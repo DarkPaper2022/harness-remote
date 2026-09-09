@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
-import { appendCursorPage, refreshCursorPage, sessionTreeRows } from "./components/native-session-home.tsx"
+import { appendCursorPage, projectCreateChoice, refreshCursorPage, sessionTreeRows } from "./components/native-session-home.tsx"
 import { canCreateNativeSession } from "./native-session-create.ts"
 
 function item(id, parentID) {
@@ -113,6 +113,81 @@ assert.equal(canCreateNativeSession({
   state: "unavailable",
   capabilities: { sessions: true, prompt: true }
 }), false, "an unavailable harness must not be offered for native create")
+
+function createMachine(localID, canonicalID, agents = [{
+  id: "codex",
+  label: "Codex",
+  backend: "codex",
+  transport: "acp",
+  managed: true,
+  state: "available",
+  capabilities: { sessions: true, prompt: true }
+}]) {
+  return {
+    machine: { id: localID, name: localID },
+    snapshot: { machine: { id: canonicalID, name: localID }, agents },
+    label: localID
+  }
+}
+
+function project(id, machineId, name, path) {
+  return { id, machineId, name, path, kind: "git" }
+}
+
+const machineOne = createMachine("saved-one", "daemon-one")
+const machineTwo = createMachine("saved-two", "daemon-two")
+
+const sameNamedProject = project("project-two", "daemon-two", "App", "/work/app")
+const chosen = projectCreateChoice(
+  { machine: machineOne.machine, directory: "/work/app" },
+  [machineOne, machineTwo],
+  {
+    "saved-one": [project("project-one", "daemon-one", "App", "/work/app")],
+    "saved-two": [sameNamedProject]
+  }
+)
+assert.equal(chosen?.project.id, "project-one", "same name/path projects must stay on the shortcut's saved machine")
+assert.equal(chosen?.key, "saved-one:project-one", "shortcut selection must use the create-panel key format")
+
+assert.equal(projectCreateChoice(
+  { machine: machineOne.machine, directory: "/work/app" },
+  [machineOne],
+  { "saved-one": [project("wrong-machine", "another-daemon", "App", "/work/app")] }
+), undefined, "a project with the wrong canonical machine id must not be selected")
+
+assert.equal(projectCreateChoice(
+  { machine: machineOne.machine, directory: "/work/missing" },
+  [machineOne],
+  { "saved-one": [project("existing", "daemon-one", "App", "/work/app")] }
+), undefined, "an uncatalogued or disappeared project must not fall back to another project")
+
+assert.equal(projectCreateChoice(
+  { machine: machineTwo.machine, directory: "/work/app" },
+  [machineOne],
+  { "saved-two": [sameNamedProject] }
+), undefined, "an offline/unavailable machine absent from createMachines must not be resolved")
+
+const noWritableAgent = createMachine("saved-no-agent", "daemon-no-agent", [{
+  id: "codex",
+  label: "Codex",
+  backend: "codex",
+  transport: "acp",
+  managed: true,
+  state: "unavailable",
+  capabilities: { sessions: true, prompt: true }
+}])
+assert.equal(projectCreateChoice(
+  { machine: noWritableAgent.machine, directory: "/work/app" },
+  [noWritableAgent],
+  { "saved-no-agent": [project("no-agent-project", "daemon-no-agent", "App", "/work/app")] }
+), undefined, "a machine without a writable agent must not offer a project shortcut")
+
+const windowsChoice = projectCreateChoice(
+  { machine: machineOne.machine, directory: "C:\\Users\\Dev\\Repo\\" },
+  [machineOne],
+  { "saved-one": [project("windows-project", "daemon-one", "Repo", "c:/users/dev/repo")] }
+)
+assert.equal(windowsChoice?.project.id, "windows-project", "Windows project paths must match after separator and case normalization")
 
 const source = readFileSync(new URL("./components/native-session-home.tsx", import.meta.url), "utf8")
 assert.match(source, /presentationOverrides/, "live detail status must survive selecting another Session")

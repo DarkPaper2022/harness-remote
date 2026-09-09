@@ -236,6 +236,21 @@ function normalizedPath(value: string): { value: string; caseInsensitive: boolea
   return { value: normalized, caseInsensitive }
 }
 
+/** Resolve a project shortcut against the live catalog of that exact saved machine. */
+export function projectCreateChoice(
+  group: Pick<ProjectGroup, "machine" | "directory">,
+  machines: CreateMachine[],
+  projectsByMachine: Record<string, MachineProject[]>
+): CreateProject | undefined {
+  const source = machines.find(({ machine }) => machine.id === group.machine.id)
+  if (!source || !group.directory || nativeCreateAgents(source.snapshot).length === 0) return undefined
+  const project = (projectsByMachine[source.machine.id] || []).find((candidate) =>
+    candidate.machineId === source.snapshot.machine.id
+    && normalizedPath(candidate.path).value === normalizedPath(group.directory).value
+  )
+  return project ? { ...source, key: `${source.machine.id}:${project.id}`, project } : undefined
+}
+
 function pathContains(projectPath: string, sessionDirectory: string): boolean {
   if (!projectPath || !sessionDirectory) return false
   const project = normalizedPath(projectPath)
@@ -356,6 +371,7 @@ export function NativeSessionHome({
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => new Set())
   const [collapsedMachines, setCollapsedMachines] = useState<Set<string>>(() => new Set())
   const [createOpen, setCreateOpen] = useState(false)
+  const [createProjectContext, setCreateProjectContext] = useState<CreateProject | null>(null)
   const [createMachineID, setCreateMachineID] = useState("")
   const [createProjectKey, setCreateProjectKey] = useState("")
   const [createAgentID, setCreateAgentID] = useState("")
@@ -758,7 +774,7 @@ export function NativeSessionHome({
       ? [{ machine, snapshot, label: snapshot.machine.name || machine.name }]
       : []
   ), [sources])
-  const selectedCreateMachine = createMachines.find(({ machine }) => machine.id === createMachineID) || createMachines[0]
+  const selectedCreateMachine = createMachines.find(({ machine }) => machine.id === createMachineID) || (createProjectContext ? undefined : createMachines[0])
   const createProjects = useMemo<CreateProject[]>(() => {
     if (!selectedCreateMachine) return []
     return (projectsByMachine[selectedCreateMachine.machine.id] || []).map((project) => ({
@@ -768,21 +784,21 @@ export function NativeSessionHome({
       project
     }))
   }, [projectsByMachine, selectedCreateMachine])
-  const selectedCreateProject = createProjects.find((choice) => choice.key === createProjectKey) || createProjects[0]
+  const selectedCreateProject = createProjects.find((choice) => choice.key === createProjectKey) || (createProjectContext ? undefined : createProjects[0])
   const createAgents = selectedCreateMachine ? nativeCreateAgents(selectedCreateMachine.snapshot) : []
   const selectedCreateAgent = createAgents.find((agent) => agent.id === createAgentID) || createAgents[0]
 
   useEffect(() => {
-    if (!createOpen) return
+    if (!createOpen || createProjectContext) return
     if (!createMachines.some(({ machine }) => machine.id === createMachineID)) {
       setCreateMachineID(createMachines[0]?.machine.id || "")
     }
-  }, [createMachineID, createMachines, createOpen])
+  }, [createMachineID, createMachines, createOpen, createProjectContext])
 
   useEffect(() => {
-    if (!createOpen) return
+    if (!createOpen || createProjectContext) return
     if (!createProjects.some((choice) => choice.key === createProjectKey)) setCreateProjectKey(createProjects[0]?.key || "")
-  }, [createOpen, createProjectKey, createProjects])
+  }, [createOpen, createProjectKey, createProjects, createProjectContext])
 
   useEffect(() => {
     if (!createOpen) return
@@ -821,19 +837,23 @@ export function NativeSessionHome({
     })
   }
 
-  function openCreatePanel() {
+  function openCreatePanel(group?: ProjectGroup) {
     // A machine snapshot arriving is not the end of startup. Project + Session discovery must settle
     // first, otherwise New Session competes with those reads on the same mobile connection and can
     // be fired while the saved machine is already in a reconnect grace state.
     if (!loaded || createMachines.length === 0) return
+    const projectContext = group ? projectCreateChoice(group, createMachines, projectsByMachine) : undefined
+    if (group && !projectContext) return
+    setCreateProjectContext(projectContext || null)
     const selectedRecord = records.find((item) => recordKey(item) === selectedKey)
     const preferredMachineID = createMachines.some(({ machine }) => machine.id === machineFilter)
       ? machineFilter
       : selectedRecord && createMachines.some(({ machine }) => machine.id === selectedRecord.machine.id)
         ? selectedRecord.machine.id
         : createMachines[0]?.machine.id || ""
-    setCreateMachineID(preferredMachineID)
-    setCreateProjectKey("")
+    setCreateMachineID(projectContext?.machine.id || preferredMachineID)
+    setCreateProjectKey(projectContext?.key || "")
+    setCreateTitle("")
     setCreateAgentID("")
     setCreateError(null)
     setCreateOpen(true)
@@ -896,7 +916,7 @@ export function NativeSessionHome({
           <button
             type="button"
             className="tdw-button primary hr-native-new-session"
-            onClick={openCreatePanel}
+            onClick={() => openCreatePanel()}
             aria-label={t("sf.newSession")}
             disabled={!loaded || createMachines.length === 0}
           >
@@ -960,22 +980,24 @@ export function NativeSessionHome({
           <label className="hr-native-create-machine">
             <span>{t("sf.machines")}</span>
             <select
-              value={selectedCreateMachine?.machine.id || ""}
+              value={selectedCreateMachine?.machine.id || createProjectContext?.machine.id || ""}
               onChange={(event) => {
                 setCreateMachineID(event.target.value)
                 setCreateProjectKey("")
                 setCreateAgentID("")
                 setCreateError(null)
               }}
-              disabled={creating || createMachines.length === 0}
+              disabled={creating || Boolean(createProjectContext) || createMachines.length === 0}
               aria-label={t("sf.filterByMachine")}
             >
+              {createProjectContext && !selectedCreateMachine ? <option value={createProjectContext.machine.id}>{createProjectContext.machine.name}</option> : null}
               {createMachines.map(({ machine, label }) => <option value={machine.id} key={machine.id}>{label}</option>)}
             </select>
           </label>
           <label>
             <span>{t("sf.project")}</span>
-            <select value={selectedCreateProject?.key || ""} onChange={(event) => { setCreateProjectKey(event.target.value); setCreateError(null) }} disabled={creating || createProjects.length === 0}>
+            <select aria-label={t("sf.project")} value={selectedCreateProject?.key || createProjectContext?.key || ""} onChange={(event) => { setCreateProjectKey(event.target.value); setCreateError(null) }} disabled={creating || Boolean(createProjectContext) || createProjects.length === 0}>
+              {createProjectContext && !selectedCreateProject ? <option value={createProjectContext.key}>{createProjectContext.project.name}</option> : null}
               {createProjects.map((choice) => <option value={choice.key} key={choice.key}>{choice.project.name}</option>)}
             </select>
           </label>
@@ -992,6 +1014,7 @@ export function NativeSessionHome({
           {createMachines.length === 0 ? <div className="hr-native-create-error">{t("sf.machinesUnavailable")}</div> : null}
           {selectedCreateMachine && createProjects.length === 0 ? <div className="hr-native-create-error">{t("sf.noProjectAvailable")}</div> : null}
           {selectedCreateMachine && createAgents.length === 0 ? <div className="hr-native-create-error">{t("sf.noAgentCanCreate")}</div> : null}
+          {createProjectContext && (!selectedCreateMachine || !selectedCreateProject) ? <div className="hr-native-create-error" role="alert">{t("sf.createProjectUnavailable")}</div> : null}
           {createError ? <div className="hr-native-create-error" role="alert">{createError}</div> : null}
           <div className="hr-native-create-actions">
             <button type="button" className="tdw-button secondary" onClick={() => setCreateOpen(false)} disabled={creating}>{t("sf.cancel")}</button>
@@ -1055,24 +1078,37 @@ export function NativeSessionHome({
                   {projects.map((group) => {
                     const expanded = expandedProjects.has(group.key)
                     const collapsed = collapsedProjects.has(group.key)
+                    const canCreateHere = loaded && Boolean(projectCreateChoice(group, createMachines, projectsByMachine))
                     const treeRows = sessionTreeRows(group.sessions)
                     const visibleRows = expanded ? treeRows : treeRows.slice(0, COLLAPSED_PROJECT_SESSION_COUNT)
                     const hiddenCount = Math.max(0, treeRows.length - COLLAPSED_PROJECT_SESSION_COUNT)
                     return (
                       <section className={`hr-native-project-group${collapsed ? " collapsed" : ""}`} key={group.key} aria-label={t("sf.groupSessions", { name: group.name })}>
-                        <button
-                          type="button"
-                          className="hr-native-project-heading"
-                          onClick={() => toggleProjectCollapsed(group.key)}
-                          aria-expanded={!collapsed}
-                          aria-label={t(collapsed ? "sf.expandGroup" : "sf.collapseGroup", { name: group.name })}
-                        >
-                          <span>
-                            <strong>{group.name}</strong>
-                            <small title={group.directory}>{group.directory || t("sf.noWorkingDirectory")}</small>
-                          </span>
-                          <span><b>{group.sessions.length}</b><i className="hr-native-project-chevron" aria-hidden="true"><ChevronDownIcon size={13} /></i></span>
-                        </button>
+                        <div className="hr-native-project-header">
+                          <button
+                            type="button"
+                            className="hr-native-project-heading"
+                            onClick={() => toggleProjectCollapsed(group.key)}
+                            aria-expanded={!collapsed}
+                            aria-label={t(collapsed ? "sf.expandGroup" : "sf.collapseGroup", { name: group.name })}
+                          >
+                            <span>
+                              <strong>{group.name}</strong>
+                              <small title={group.directory}>{group.directory || t("sf.noWorkingDirectory")}</small>
+                            </span>
+                            <span><b>{group.sessions.length}</b><i className="hr-native-project-chevron" aria-hidden="true"><ChevronDownIcon size={13} /></i></span>
+                          </button>
+                          <button
+                            type="button"
+                            className="tdw-button secondary hr-native-project-create"
+                            onClick={() => openCreatePanel(group)}
+                            disabled={!canCreateHere || creating}
+                            aria-label={t("sf.newSessionInProject", { name: group.name })}
+                            title={t("sf.newSessionInProject", { name: group.name })}
+                          >
+                            <PlusIcon size={16} />
+                          </button>
+                        </div>
                         {!collapsed ? (
                           <>
                             <div className="hr-native-home-list">

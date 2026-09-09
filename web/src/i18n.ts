@@ -318,6 +318,8 @@ type TranslationKey =
   | 'sf.recentCount'
   | 'sf.workingShown'
   | 'sf.newSession'
+  | 'sf.newSessionInProject'
+  | 'sf.createProjectUnavailable'
   | 'sf.searchSessions'
   | 'sf.searchSessionsLabel'
   | 'sf.filterSessions'
@@ -789,6 +791,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.recentCount': '{count} recent',
     'sf.workingShown': '{working} working · {shown} shown',
     'sf.newSession': 'New Session',
+    'sf.newSessionInProject': 'New session in {name}',
+    'sf.createProjectUnavailable': 'This project or its machine is unavailable. Reconnect or reopen the dialog to choose another project.',
     'sf.searchSessions': 'Search sessions',
     'sf.searchSessionsLabel': 'Search Sessions',
     'sf.filterSessions': 'Filter Sessions',
@@ -1260,6 +1264,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.recentCount': '{count} recenti',
     'sf.workingShown': '{working} in lavorazione · {shown} mostrate',
     'sf.newSession': 'Nuova sessione',
+    'sf.newSessionInProject': 'Nuova sessione in {name}',
+    'sf.createProjectUnavailable': 'Il progetto o la sua macchina non è disponibile. Riconnettiti o riapri la finestra per scegliere un altro progetto.',
     'sf.searchSessions': 'Cerca sessioni',
     'sf.searchSessionsLabel': 'Cerca sessioni',
     'sf.filterSessions': 'Filtra sessioni',
@@ -1683,6 +1689,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.recentCount': '最近 {count} 個',
     'sf.workingShown': '{working} 執行中 · 顯示 {shown} 個',
     'sf.newSession': '新增工作階段',
+    'sf.newSessionInProject': '在「{name}」新增工作階段',
+    'sf.createProjectUnavailable': '此專案或其主機目前無法使用。請重新連線，或重新開啟視窗選擇其他專案。',
     'sf.searchSessions': '搜尋工作階段',
     'sf.searchSessionsLabel': '搜尋工作階段',
     'sf.filterSessions': '篩選工作階段',
@@ -2151,6 +2159,8 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.recentCount': '最近 {count} 个',
     'sf.workingShown': '{working} 执行中 · 显示 {shown} 个',
     'sf.newSession': '新建会话',
+    'sf.newSessionInProject': '在“{name}”中新建会话',
+    'sf.createProjectUnavailable': '此项目或所在机器当前不可用。请重新连接，或重新打开面板选择其他项目。',
     'sf.searchSessions': '搜索会话',
     'sf.searchSessionsLabel': '搜索会话',
     'sf.filterSessions': '筛选会话',

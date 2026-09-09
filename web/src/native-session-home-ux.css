@@ -76,3 +76,29 @@
     grid-column: 1;
   }
 }
+
+/* Separate touch targets: creating a Session never toggles the project disclosure. */
+.hr-native-project-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.hr-native-project-header > .hr-native-project-heading {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+
+.hr-native-project-header > .hr-native-project-create {
+  flex: 0 0 44px;
+  width: 44px;
+  min-height: 44px;
+  padding: 0;
+  justify-content: center;
+}
+
+.hr-native-project-create:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
