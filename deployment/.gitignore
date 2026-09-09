@@ -1,0 +1,6 @@
+# Only the reusable Codex launcher is published. All deployment files stay local.
+/*
+!/.gitignore
+!/bin/
+/bin/*
+!/bin/codex-acp
