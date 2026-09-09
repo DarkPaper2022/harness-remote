@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import path from "node:path"
-import { AcpClient } from "./acp-client.js"
+import { createHarnessAcpClient } from "./session-acp-client.js"
 import { parseConfig, usage } from "./config.js"
 import { harnessProfile } from "./harness-profiles.js"
 import { loadMachineIdentity, MachineRegistry, trackAgentHostLifecycle } from "./machine-registry.js"
@@ -33,7 +33,7 @@ if (config) {
   })
 
   const acp = trackAgentHostLifecycle(
-    new AcpClient({ command: config.acpCommand, args: config.acpArgs, permissionMode: profile.permissionMode, preferredAuthMethod: profile.authMethod }),
+    createHarnessAcpClient(config.backend, { command: config.acpCommand, args: config.acpArgs, permissionMode: profile.permissionMode, preferredAuthMethod: profile.authMethod }),
     machineRegistry,
     profile.id
   )
@@ -67,12 +67,17 @@ if (config) {
     process.stdout.write(`Machine: ${machineIdentity.name} (${machineIdentity.id})\n`)
   })
 
-  const shutdown = () => {
+  const shutdown = async () => {
     if (shuttingDown) return
     shuttingDown = true
-    acp.close()
-    server.close(() => process.exit(0))
-    setTimeout(() => process.exit(1), 5_000).unref()
+    const deadline = setTimeout(() => process.exit(1), 15_000)
+    try {
+      await acp.close()
+      server.close(() => { clearTimeout(deadline); process.exit(0) })
+    } catch (error) {
+      process.stderr.write(`Shutdown failed: ${error.message}\n`)
+      process.exit(1)
+    }
   }
   process.on("SIGINT", shutdown)
   process.on("SIGTERM", shutdown)

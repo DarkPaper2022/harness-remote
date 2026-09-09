@@ -174,12 +174,14 @@ export class MachineDaemon {
     }
   }
 
-  close() {
+  async close() {
+    const closing = []
     for (const entry of this.hosts.values()) {
       entry.modelCatalog?.close?.()
-      if (entry.kind === "acp") entry.host.close?.()
+      if (entry.kind === "acp") closing.push(entry.host.close?.())
       else entry.host.stop?.("SIGTERM")
     }
+    await Promise.all(closing)
   }
 }
 
@@ -245,6 +247,20 @@ export function createMachineDaemonServer({
     const server = agentID === primaryAgentID ? bridgeServer : acpBridgeServer(agentID)
     return server?.acpService
   }
+  // Fence the whole operation, including asynchronous model resolution before service.prompt.
+  const sessionMutations = new Map()
+  const releasingSessions = new Set()
+  const withSessionMutation = (operation) => async (agentID, sessionID, ...args) => {
+    const key = nativeSessionKey(agentID, sessionID)
+    if (releasingSessions.has(key)) throw daemonError("session_release_in_progress", "Session release is in progress")
+    sessionMutations.set(key, (sessionMutations.get(key) ?? 0) + 1)
+    try { return await operation(agentID, sessionID, ...args) }
+    finally {
+      const count = sessionMutations.get(key) - 1
+      if (count) sessionMutations.set(key, count)
+      else sessionMutations.delete(key)
+    }
+  }
   const claimedAgents = new Set()
   const claimSession = async (agentID, sessionID) => {
     const entry = daemon.hostEntry(agentID)
@@ -267,6 +283,29 @@ export function createMachineDaemonServer({
       throw error
     }
     claimedAcpSessions.add(nativeSessionKey(agentID, sessionID))
+  }
+  const releaseSession = async (agentID, sessionID) => {
+    if (process.platform === "win32") {
+      throw daemonError("unsupported_agent", "Session release is not supported on Windows")
+    }
+    const entry = daemon.hostEntry(agentID)
+    if (!entry) throw daemonError("unknown_agent", `Unknown agent: ${agentID}`)
+    if (entry.kind !== "acp" || agentID !== "codex") {
+      throw daemonError("unsupported_agent", "Session release is only supported for Codex")
+    }
+    const key = nativeSessionKey(agentID, sessionID)
+    const service = acpService(agentID)
+    if (!service || typeof service.releaseSession !== "function") {
+      throw daemonError("session_unavailable", `Agent ${agentID} cannot release native Sessions`)
+    }
+    if (sessionMutations.has(key) || releasingSessions.has(key)) {
+      throw daemonError("session_release_rejected", "Session has an operation in progress; retry when idle")
+    }
+    releasingSessions.add(key)
+    try {
+      await service.releaseSession(sessionID)
+      claimedAcpSessions.delete(key)
+    } finally { releasingSessions.delete(key) }
   }
   const promptSession = async (agentID, sessionID, { text, directory, model, variant, attachments = [] }) => {
     const entry = daemon.hostEntry(agentID)
@@ -652,10 +691,11 @@ export function createMachineDaemonServer({
   const claimServer = createClaimServer({
     innerServer,
     config,
-    claimSession,
-    promptSession,
-    commandSession,
-    stopSession,
+    claimSession: withSessionMutation(claimSession),
+    promptSession: withSessionMutation(promptSession),
+    commandSession: withSessionMutation(commandSession),
+    stopSession: withSessionMutation(stopSession),
+    releaseSession,
     handoffSession,
     reconcileHandoff,
     operationLedger: operations,

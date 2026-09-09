@@ -359,6 +359,14 @@ export const api = {
     return request<Session>(config, withDirectory("/session", directory), { method: "POST", body: { title, model: toCreateSessionModel(model) } })
   },
 
+  releaseSession(config: ServerConfig, sessionID: string) {
+    return request<{ released: boolean; sessionID: string }>(
+      config,
+      `/session/${encodeURIComponent(sessionID)}/release`,
+      { method: "POST", body: {} }
+    )
+  },
+
   async listNativeSessionLinks(config: ServerConfig, identity: NativeSessionIdentityPayload) {
     const params = new URLSearchParams({
       machineID: identity.machineID,

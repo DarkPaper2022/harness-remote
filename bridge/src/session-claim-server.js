@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import http from "node:http"
 import { authenticateDaemonRequest, writeJSON } from "./http-policy.js"
 
-const SESSION_OPERATION_ROUTE = /^\/v1\/agents\/([^/]+)\/session\/([^/]+)\/(claim|prompt|command|stop|handoff)$/
+const SESSION_OPERATION_ROUTE = /^\/v1\/agents\/([^/]+)\/session\/([^/]+)\/(claim|prompt|command|stop|release|handoff)$/
 const SESSION_LINK_ROUTE = "/v1/session-links"
 const ATTACHMENT_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"])
 const MAX_ATTACHMENTS = 8
@@ -26,6 +26,8 @@ function statusForSessionError(error) {
     "session_prompt_rejected",
     "session_command_rejected",
     "session_stop_rejected",
+    "session_release_rejected",
+    "session_release_in_progress",
     // A variant the current model does not offer is a conflict about the user's choice, not a
     // server fault: the Session is fine and remains usable with another selection.
     "model_variant_unavailable",
@@ -239,6 +241,7 @@ export function createSessionClaimServer({
   promptSession,
   commandSession,
   stopSession,
+  releaseSession,
   handoffSession,
   reconcileHandoff,
   operationLedger,
@@ -295,6 +298,14 @@ export function createSessionClaimServer({
       if (operation === "claim") {
         await claimSession(agentID, sessionID)
         writeJSON(response, 200, { claimed: true, sessionID })
+        return
+      }
+
+      if (operation === "release") {
+        if (typeof releaseSession !== "function") throw new Error("Native Session release transport is not configured")
+        await readJSONBody(request)
+        await releaseSession(agentID, sessionID)
+        writeJSON(response, 200, { released: true, sessionID })
         return
       }
 

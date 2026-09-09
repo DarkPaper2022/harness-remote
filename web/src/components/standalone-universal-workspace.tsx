@@ -751,6 +751,16 @@ function NativeSessionsWorkspace({
     setMobileDetailOpen(false)
   }
 
+  function handleSessionReleased(key: string) {
+    // Unmount the observer immediately. This drops the mobile writer runtime and makes the next
+    // owner (for example PC Codex) the only client that can resume the Session.
+    if (selected?.key !== key) return
+    setSelected(null)
+    setSelectedState(undefined)
+    setMobileDetailOpen(false)
+    setListRevision((value) => value + 1)
+  }
+
   const handleSessionDeletionSettled = clearSessionDeleting
 
   function handleSessionRenamed(session: Session, title: string) {
@@ -892,9 +902,11 @@ function NativeSessionsWorkspace({
                   ) : null}
                   <NativeSessionActions
                     target={selected}
+                    busy={selectedState === "working"}
                     onDeleteStarted={handleSessionDeleteStarted}
                     onDeleteFailed={handleSessionDeleteFailed}
                     onDeleted={handleSessionDeleted}
+                    onReleased={handleSessionReleased}
                   />
                   <code title={selected.sessionID}>{selected.sessionID}</code>
                 </div>

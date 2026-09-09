@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path"
 import { AcpClient } from "./acp-client.js"
+import { createHarnessAcpClient } from "./session-acp-client.js"
 import { AcpAgentModelCatalog, HttpAgentModelCatalog } from "./agent-model-catalog.js"
 import { parseConfig, usage as bridgeUsage } from "./config.js"
 import { acpHarnessCapabilityContract, openCodeCapabilityContract } from "./harness-capability-contract.js"
@@ -127,7 +128,7 @@ async function main() {
       ? { command: config.acpCommand, args: config.acpArgs }
       : resolveAcpLaunch(profile)
     const agentConfig = { ...config, backend: profile.id, acpCommand: launch.command, acpArgs: launch.args }
-    const acp = new AcpClient({
+    const acp = createHarnessAcpClient(backend, {
       command: launch.command,
       args: launch.args,
       permissionMode: profile.permissionMode,
@@ -248,12 +249,17 @@ async function main() {
   }
 
   let shuttingDown = false
-  const shutdown = () => {
+  const shutdown = async () => {
     if (shuttingDown) return
     shuttingDown = true
-    daemon.close()
-    server.close(() => process.exit(0))
-    setTimeout(() => process.exit(1), 5_000).unref()
+    const deadline = setTimeout(() => process.exit(1), 15_000)
+    try {
+      await daemon.close()
+      server.close(() => { clearTimeout(deadline); process.exit(0) })
+    } catch (error) {
+      process.stderr.write(`Shutdown failed: ${error.message}\n`)
+      process.exit(1)
+    }
   }
   process.on("SIGINT", shutdown)
   process.on("SIGTERM", shutdown)

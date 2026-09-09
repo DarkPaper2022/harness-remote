@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process"
 import { EventEmitter } from "node:events"
+import { readdir, readFile } from "node:fs/promises"
 
 // An adapter launched through `npx` downloads itself on first use, which takes far longer
 // than a warm start. Ten seconds failed on a cold PI adapter while npm was still fetching.
@@ -7,6 +8,26 @@ const START_TIMEOUT_MS = 90_000
 const REQUEST_TIMEOUT_MS = 30_000
 /** Kept so a failed handshake can report why the adapter died instead of just its exit code. */
 const STDERR_KEPT_CHARS = 600
+
+async function processGroupAlive(pid) {
+  if (process.platform === "linux") {
+    for (const entry of await readdir("/proc")) {
+      if (!/^\d+$/.test(entry)) continue
+      let stat
+      try { stat = await readFile(`/proc/${entry}/stat`, "utf8") } catch (error) {
+        if (error.code === "ENOENT" || error.code === "ESRCH") continue
+        throw error
+      }
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ")
+      if (Number(fields[2]) === pid && fields[0] !== "Z" && fields[0] !== "X") return true
+    }
+    return false
+  }
+  try { process.kill(-pid, 0); return true } catch (error) {
+    if (error.code === "ESRCH") return false
+    throw error
+  }
+}
 
 /**
  * JSON-RPC only promises a human-readable `message`, and adapters sometimes spend it on a bare
@@ -36,14 +57,17 @@ export class AcpClient extends EventEmitter {
   #sessionCapabilities = {}
   #stderr = ""
   #stderrPartial = ""
+  #processGroup
+  #closingPID
 
-  constructor({ command = "omp", args = ["acp"], permissionMode = "deny", preferredAuthMethod, spawnProcess = spawn } = {}) {
+  constructor({ command = "omp", args = ["acp"], permissionMode = "deny", preferredAuthMethod, spawnProcess = spawn, processGroup = false } = {}) {
     super()
     this.#command = command
     this.#args = args
     this.#permissionMode = permissionMode
     this.#preferredAuthMethod = preferredAuthMethod
     this.#spawn = spawnProcess
+    this.#processGroup = processGroup && process.platform !== "win32"
   }
 
   get agentInfo() {
@@ -112,6 +136,7 @@ export class AcpClient extends EventEmitter {
   }
 
   async #start(timeoutMs) {
+    if (this.#closingPID) await this.closeAndWait()
     const deadline = Date.now() + Math.max(1, timeoutMs)
     const remaining = (phase) => {
       const value = deadline - Date.now()
@@ -126,6 +151,7 @@ export class AcpClient extends EventEmitter {
       : ["/d", "/s", "/c", this.#command, ...this.#args]
     const child = this.#spawn(windowsCommand, windowsArgs, {
       stdio: ["pipe", "pipe", "pipe"],
+      ...(this.#processGroup ? { detached: true } : {}),
       windowsHide: true
     })
     this.#child = child
@@ -252,8 +278,43 @@ export class AcpClient extends EventEmitter {
   close() {
     const child = this.#child
     this.#child = undefined
-    if (child && !child.killed) child.kill()
+    if (child && !child.killed) {
+      if (this.#processGroup) {
+        this.#closingPID = child.pid
+        try { process.kill(-child.pid, "SIGTERM") } catch (error) { if (error.code !== "ESRCH") throw error }
+      } else child.kill()
+    }
     this.#rejectPending(new Error("ACP adapter closed"))
+  }
+
+  /** Close only the process group created by this client, including npx and native children. */
+  async closeAndWait() {
+    const child = this.#child
+    if (!child && !this.#closingPID) return
+    if (!this.#processGroup) throw new Error("Session release requires an isolated POSIX process group")
+    // close also waits for stdout to drain, fencing stale session notifications before release.
+    const exited = child ? new Promise((resolve) => child.once("close", resolve)) : Promise.resolve()
+    const pid = this.#closingPID ?? child.pid
+    this.#closingPID = pid
+    this.close()
+    let timer
+    try {
+      await Promise.race([exited, new Promise((resolve) => { timer = setTimeout(resolve, 5_000) })])
+    } finally { clearTimeout(timer) }
+    // A launcher can exit before its native child. SIGKILL to our own group makes closure
+    // deterministic even when an adapter ignores TERM; no other session shares this group.
+    try { process.kill(-pid, "SIGKILL") } catch (error) { if (error.code !== "ESRCH") throw error }
+    try {
+      await Promise.race([exited, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Session process is still shutting down; retry release")), 5_000)
+      })])
+    } finally { clearTimeout(timer) }
+    const deadline = Date.now() + 5_000
+    while (await processGroupAlive(pid)) {
+      if (Date.now() >= deadline) throw new Error("Session process group is still shutting down; retry release")
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    this.#closingPID = undefined
   }
 
   #consume(chunk) {
@@ -348,6 +409,7 @@ export class AcpClient extends EventEmitter {
 
   #handleExit(error) {
     if (!this.#child) return
+    if (this.#processGroup) this.#closingPID = this.#child.pid
     this.#child = undefined
     this.#rejectPending(error)
     this.emit("exit", error)

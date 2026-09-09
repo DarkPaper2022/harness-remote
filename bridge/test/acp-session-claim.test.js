@@ -34,7 +34,7 @@ class FakeAcp extends EventEmitter {
         configOptions: [{
           id: "model",
           currentValue: "model-a",
-          options: [{ value: "model-a", name: "Model A" }]
+          options: [{ value: "model-a", name: "Model A" }, { value: "model-b", name: "Model B" }]
         }]
       }
     }
@@ -130,10 +130,90 @@ test("an ACP Session already opened successfully by this daemon can be claimed w
   assert.equal(loadRequests(acp).length, 1)
 })
 
+test("release preserves history and subsequent metadata reads do not reclaim the writer", async () => {
+  const acp = new FakeAcp()
+  const historyLoader = journalLoader()
+  historyLoader.readOnlyExternalMetadata = true
+  const service = new AcpService(acp, { historyLoader })
+  await service.claimSession("native-1")
+  assert.deepEqual(await service.releaseSession("native-1"), { released: true, sessionID: "native-1" })
+  assert.deepEqual(acp.requests.at(-1), ["session/close", { sessionId: "native-1" }])
+  assert.deepEqual(await service.releaseSession("native-1"), { released: true, sessionID: "native-1" })
+  const loadsBeforeRead = loadRequests(acp).length
+  assert.equal((await service.listSessions())[0].external, true)
+  assert.deepEqual(await service.models("native-1"), [])
+  assert.deepEqual(await service.commands("native-1"), [])
+  assert.deepEqual(await service.actions("native-1"), [])
+  assert.equal((await service.messages("native-1")).length, 1)
+  assert.equal(loadRequests(acp).length, loadsBeforeRead, "read-only metadata must not reacquire the writer")
+})
+
 test("claim refuses a native Session that no longer exists", async () => {
   const acp = new FakeAcp()
   acp.listSessions = async () => []
   const service = new AcpService(acp)
   await assert.rejects(() => service.claimSession("missing"), /Harness session not found/)
   assert.equal(loadRequests(acp).length, 0)
+})
+
+function deferred() {
+  let resolve, reject
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+
+test("release fences all mutations and failed close leaves ownership available for retry", async () => {
+  const acp = new FakeAcp()
+  const service = new AcpService(acp, { historyLoader: journalLoader() })
+  await service.claimSession("native-1")
+  const close = deferred()
+  const request = acp.request.bind(acp)
+  acp.request = (method, params) => method === "session/close" ? close.promise : request(method, params)
+  const releasing = service.releaseSession("native-1")
+  for (const mutation of [
+    () => service.claimSession("native-1"),
+    () => service.prompt("native-1", "must not send"),
+    () => service.setModel("native-1", "model-a"),
+    () => service.renameSession("native-1", "must not rename"),
+    () => service.deleteSession("native-1"),
+    () => service.invokeAction("native-1", "undo")
+  ]) await assert.rejects(mutation, /release is in progress/)
+  close.reject(new Error("native child still shutting down"))
+  await assert.rejects(releasing, /still shutting down/)
+  assert.equal((await service.listSessions())[0].external, undefined)
+  acp.request = request
+  await service.releaseSession("native-1")
+  assert.equal((await service.listSessions())[0].external, true)
+})
+
+test("release cannot report success while an external claim is still loading", async () => {
+  const acp = new FakeAcp()
+  const service = new AcpService(acp, { historyLoader: journalLoader() })
+  const load = deferred(), entered = deferred()
+  const request = acp.request.bind(acp)
+  acp.request = async (method, params) => {
+    if (method === "session/load") { entered.resolve(); await load.promise }
+    return request(method, params)
+  }
+  const claiming = service.claimSession("native-1")
+  await entered.promise
+  await assert.rejects(service.releaseSession("native-1"), /busy/)
+  load.resolve(); await claiming
+  await service.releaseSession("native-1")
+})
+
+test("release rejects a prompt awaiting model selection before the turn becomes active", async () => {
+  const acp = new FakeAcp()
+  const service = new AcpService(acp, { historyLoader: journalLoader() })
+  await service.claimSession("native-1")
+  const model = deferred(), entered = deferred()
+  const request = acp.request.bind(acp)
+  acp.request = async (method, params) => {
+    if (method === "session/set_config_option") { entered.resolve(); await model.promise }
+    return request(method, params)
+  }
+  const prompting = service.prompt("native-1", "hello", "model-b")
+  await entered.promise
+  await assert.rejects(service.releaseSession("native-1"), /busy/)
+  model.resolve(); await prompting
 })

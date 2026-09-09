@@ -436,6 +436,8 @@ export class AcpService {
   #ownedSessions = new Set()
   #adoptedSessions = new Set()
   #acpOpenSessions = new Set()
+  #releasing = new Set()
+  #mutations = new Map()
   #promptAcknowledgements = new Map()
   #titles = new Map()
   #deletedSessions = new Set()
@@ -614,6 +616,20 @@ export class AcpService {
     return sessionView(session, "idle", this.#titleFor(session.sessionId))
   }
 
+  #beginMutation(sessionID) {
+    if (this.#releasing.has(sessionID)) {
+      const error = new Error("Session release is in progress")
+      error.code = "session_release_in_progress"
+      throw error
+    }
+    this.#mutations.set(sessionID, (this.#mutations.get(sessionID) ?? 0) + 1)
+    return () => {
+      const count = this.#mutations.get(sessionID) ?? 0
+      if (count <= 1) this.#mutations.delete(sessionID)
+      else this.#mutations.set(sessionID, count - 1)
+    }
+  }
+
   /**
    * Explicitly acquire the writer for one exact existing native ACP Session.
    *
@@ -623,6 +639,11 @@ export class AcpService {
    * Otherwise force the hardened session/load path and mark ownership only after it succeeds.
    */
   async claimSession(sessionID) {
+    const end = this.#beginMutation(sessionID)
+    try { return await this.#claimSession(sessionID) } finally { end() }
+  }
+
+  async #claimSession(sessionID) {
     await this.#requireSession(sessionID)
     if (this.#ownedSessions.has(sessionID) && !this.#adoptedSessions.has(sessionID)) return true
     if (this.#acpOpenSessions.has(sessionID) && !this.#adoptedSessions.has(sessionID)) {
@@ -636,6 +657,40 @@ export class AcpService {
     this.#adoptedSessions.delete(sessionID)
     this.#persistSnapshot(sessionID)
     return true
+  }
+
+  /** Release this daemon's writer without claiming an external Session as a side effect. */
+  async releaseSession(sessionID) {
+    if (this.#releasing.has(sessionID)) {
+      const error = new Error("Session release is already in progress")
+      error.code = "session_release_in_progress"
+      throw error
+    }
+    if (this.#mutations.has(sessionID) || this.#isBusy(sessionID) || this.#loads.has(sessionID) || this.#active.has(sessionID)) {
+      const error = new Error("Cannot release a busy Session")
+      error.code = "session_release_rejected"
+      throw error
+    }
+    if (!this.#ownedSessions.has(sessionID) && !this.#acpOpenSessions.has(sessionID)) return { released: true, sessionID }
+    this.#releasing.add(sessionID)
+    try {
+      if (this.#acpOpenSessions.has(sessionID)) {
+        await this.#acp.request("session/close", { sessionId: sessionID })
+      }
+      this.#ownedSessions.delete(sessionID)
+      this.#adoptedSessions.delete(sessionID)
+      this.#acpOpenSessions.delete(sessionID)
+      this.#loaded.delete(sessionID)
+      this.#configOptions.delete(sessionID)
+      this.#commandCatalogs.delete(sessionID)
+      this.#actionStates.delete(sessionID)
+      this.#authoritativeActionStates.delete(sessionID)
+      this.#persistSnapshot(sessionID)
+      this.#emit("session.updated", sessionID)
+      return { released: true, sessionID }
+    } finally {
+      this.#releasing.delete(sessionID)
+    }
   }
 
   /**
@@ -664,6 +719,11 @@ export class AcpService {
   }
 
   async renameSession(sessionID, title) {
+    const end = this.#beginMutation(sessionID)
+    try { return await this.#renameSession(sessionID, title) } finally { end() }
+  }
+
+  async #renameSession(sessionID, title) {
     const normalized = title.trim().replace(/\s+/g, " ")
     if (!normalized) throw new Error("A session title is required")
     await this.#requireSession(sessionID)
@@ -787,6 +847,11 @@ export class AcpService {
   }
 
   async deleteSession(sessionID) {
+    const end = this.#beginMutation(sessionID)
+    try { return await this.#deleteSession(sessionID) } finally { end() }
+  }
+
+  async #deleteSession(sessionID) {
     // A Session deleted by a pre-index Harness Remote may already carry deleted:true only in its
     // per-Session snapshot. Restoring that snapshot must migrate the tombstone into the lightweight
     // deletion index instead of failing before the index can be written. This keeps DELETE
@@ -1044,6 +1109,11 @@ export class AcpService {
   }
 
   async invokeAction(sessionID, actionID) {
+    const end = this.#beginMutation(sessionID)
+    try { return await this.#invokeAction(sessionID, actionID) } finally { end() }
+  }
+
+  async #invokeAction(sessionID, actionID) {
     const available = await this.actions(sessionID)
     if (!available.some((action) => action.id === actionID)) throw new Error(`Harness action is not available: ${actionID}`)
     if (!available.some((action) => action.id === actionID && action.enabled)) throw new Error(`Harness action is disabled: ${actionID}`)
@@ -1141,6 +1211,11 @@ export class AcpService {
    * against a Session whose options have not been loaded yet.
    */
   async setModel(sessionID, model, variant) {
+    const end = this.#beginMutation(sessionID)
+    try { return await this.#setModel(sessionID, model, variant) } finally { end() }
+  }
+
+  async #setModel(sessionID, model, variant) {
     await this.#loadForConfigOptions(sessionID)
     const option = this.#configOptions.get(sessionID)?.find((item) => item.id === "model")
     // The app addresses models as `provider/model` because that is what OpenCode's API does, but a
@@ -1202,6 +1277,11 @@ export class AcpService {
    * is what makes it visible in the conversation while it waits.
    */
   async prompt(sessionID, text, model, attachments = [], variant) {
+    const end = this.#beginMutation(sessionID)
+    try { return await this.#prompt(sessionID, text, model, attachments, variant) } finally { end() }
+  }
+
+  async #prompt(sessionID, text, model, attachments = [], variant) {
     // Refuse before touching the session: an agent that never advertised image support
     // would reject the block mid-turn, which reads as a failed prompt rather than a
     // rejected attachment.
@@ -1593,6 +1673,11 @@ export class AcpService {
   }
 
   async #load(sessionID, force = false, requireConfigOptions = false) {
+    const end = this.#beginMutation(sessionID)
+    try { return await this.#loadGuarded(sessionID, force, requireConfigOptions) } finally { end() }
+  }
+
+  async #loadGuarded(sessionID, force = false, requireConfigOptions = false) {
     if (!this.#sessions.has(sessionID)) await this.listSessions()
     if (this.#deletedSessions.has(sessionID)) throw new Error("Harness session not found")
     const session = this.#sessions.get(sessionID)

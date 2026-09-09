@@ -391,6 +391,11 @@ type TranslationKey =
   | 'sf.keepSession'
   | 'sf.deleteSession'
   | 'sf.deleting'
+  | 'sf.releaseSessionTitle'
+  | 'sf.releaseSubtitle'
+  | 'sf.closeRelease'
+  | 'sf.releaseSession'
+  | 'sf.releasing'
   | 'sf.backToSessions'
   | 'sf.createdInHarnessRemote'
   | 'sf.startedInHarness'
@@ -864,6 +869,11 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.keepSession': 'Keep Session',
     'sf.deleteSession': 'Delete Session',
     'sf.deleting': 'Deleting…',
+    'sf.releaseSessionTitle': 'Release “{title}”?',
+    'sf.releaseSubtitle': 'Release the writer lock so you can resume this Session from your PC.',
+    'sf.closeRelease': 'Close Release Session',
+    'sf.releaseSession': 'Release Session',
+    'sf.releasing': 'Releasing…',
     'sf.backToSessions': 'Back to Sessions',
     'sf.createdInHarnessRemote': 'Created in Harness Remote',
     'sf.startedInHarness': 'Started in the native harness',
@@ -1337,6 +1347,11 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.keepSession': 'Mantieni sessione',
     'sf.deleteSession': 'Elimina sessione',
     'sf.deleting': 'Eliminazione…',
+    'sf.releaseSessionTitle': 'Rilasciare “{title}”?',
+    'sf.releaseSubtitle': 'Rilascia il blocco di scrittura per riprendere questa sessione dal PC.',
+    'sf.closeRelease': 'Chiudi Rilascia sessione',
+    'sf.releaseSession': 'Rilascia sessione',
+    'sf.releasing': 'Rilascio…',
     'sf.backToSessions': 'Torna alle sessioni',
     'sf.createdInHarnessRemote': 'Creata in Harness Remote',
     'sf.startedInHarness': 'Avviata nell\'harness nativo',
@@ -1762,6 +1777,11 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.keepSession': '保留工作階段',
     'sf.deleteSession': '刪除工作階段',
     'sf.deleting': '刪除中…',
+    'sf.releaseSessionTitle': '要釋放「{title}」嗎？',
+    'sf.releaseSubtitle': '釋放寫入鎖定，讓你可以在 PC 上繼續此工作階段。',
+    'sf.closeRelease': '關閉釋放工作階段',
+    'sf.releaseSession': '釋放工作階段',
+    'sf.releasing': '釋放中…',
     'sf.backToSessions': '返回工作階段',
     'sf.createdInHarnessRemote': '在 Harness Remote 建立',
     'sf.startedInHarness': '在原生 harness 啟動',
@@ -2232,6 +2252,11 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.keepSession': '保留会话',
     'sf.deleteSession': '删除会话',
     'sf.deleting': '删除中…',
+    'sf.releaseSessionTitle': '要释放“{title}”吗？',
+    'sf.releaseSubtitle': '释放写锁后，你可以在 PC 上继续此会话。',
+    'sf.closeRelease': '关闭释放会话',
+    'sf.releaseSession': '释放会话',
+    'sf.releasing': '释放中…',
     'sf.backToSessions': '返回会话',
     'sf.createdInHarnessRemote': '在 Harness Remote 创建',
     'sf.startedInHarness': '在原生 harness 启动',

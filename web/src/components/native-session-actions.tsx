@@ -18,17 +18,20 @@ import { useTranslator } from "../useTranslator"
  */
 type Props = {
   target: NativeSessionSurfaceTarget
+  busy?: boolean
   onDeleteStarted?: (key: string) => void
   onDeleteFailed?: (key: string) => void
   onDeleted: (key: string) => void
+  onReleased: (key: string) => void
 }
 
-export function NativeSessionActions({ target, onDeleteStarted, onDeleteFailed, onDeleted }: Props) {
+export function NativeSessionActions({ target, busy: externalBusy = false, onDeleteStarted, onDeleteFailed, onDeleted, onReleased }: Props) {
   const t = useTranslator()
-  const [mode, setMode] = useState<"delete" | null>(null)
+  const [mode, setMode] = useState<"delete" | "release" | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const deleteRef = useRef<HTMLDivElement>(null)
+  const releaseRef = useRef<HTMLDivElement>(null)
 
   // Switching Session must never leave a primed deletion pointing at the Session the user just
   // navigated to.
@@ -45,8 +48,10 @@ export function NativeSessionActions({ target, onDeleteStarted, onDeleteFailed, 
   }
 
   useDialogDismiss(deleteRef, close, { enabled: mode === "delete" })
+  useDialogDismiss(releaseRef, close, { enabled: mode === "release" })
 
-  if (!target.deleteSupported) return null
+  const releaseSupported = target.backend === "codex"
+  if (!target.deleteSupported && !releaseSupported) return null
 
   function beginDelete() {
     if (busy) return
@@ -71,14 +76,41 @@ export function NativeSessionActions({ target, onDeleteStarted, onDeleteFailed, 
     }
   }
 
+  function beginRelease() {
+    if (busy || externalBusy) return
+    setError(null)
+    setMode("release")
+  }
+
+  async function releaseSession() {
+    if (busy || externalBusy) return
+    setBusy(true)
+    setError(null)
+    try {
+      const result = await api.releaseSession(target.config, target.sessionID)
+      if (!result.released) throw new Error("The Session was not released.")
+      setMode(null)
+      onReleased(target.key)
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="hr-session-actions">
+      {releaseSupported ? (
+        <button type="button" className="tdw-button secondary hr-session-release" onClick={beginRelease} disabled={busy || externalBusy} aria-expanded={mode === "release"}>
+          {t("sf.releaseSession")}
+        </button>
+      ) : null}
       {target.deleteSupported ? (
         <button
           type="button"
           className="tdw-icon-button hr-session-action-danger"
           onClick={beginDelete}
-          disabled={busy}
+          disabled={busy || externalBusy}
           aria-expanded={mode === "delete"}
           aria-label={t("sf.deleteSession")}
           title={t("sf.deleteSession")}
@@ -104,6 +136,25 @@ export function NativeSessionActions({ target, onDeleteStarted, onDeleteFailed, 
             <button type="button" className="tdw-button danger" onClick={() => void deleteSession()} disabled={busy}>
               {busy ? <LoadingIcon size={15} /> : null}
               {busy ? t("sf.deleting") : t("sf.deleteSession")}
+            </button>
+          </div>
+        </div>
+      ) : null}
+      {mode === "release" ? (
+        <div className="hr-session-action-panel" role="dialog" aria-modal="true" aria-label={t("sf.releaseSession")} ref={releaseRef}>
+          <div className="hr-session-action-heading">
+            <div>
+              <strong>{t("sf.releaseSessionTitle", { title: target.title })}</strong>
+              <small>{t("sf.releaseSubtitle")}</small>
+            </div>
+            <button type="button" className="tdw-icon-button" onClick={close} disabled={busy} aria-label={t("sf.closeRelease")}>×</button>
+          </div>
+          {error ? <div className="hr-session-action-error" role="alert">{error}</div> : null}
+          <div className="hr-session-action-buttons">
+            <button type="button" className="tdw-button secondary" data-autofocus onClick={close} disabled={busy}>{t("sf.cancel")}</button>
+            <button type="button" className="tdw-button primary" onClick={() => void releaseSession()} disabled={busy || externalBusy}>
+              {busy ? <LoadingIcon size={15} /> : null}
+              {busy ? t("sf.releasing") : t("sf.releaseSession")}
             </button>
           </div>
         </div>

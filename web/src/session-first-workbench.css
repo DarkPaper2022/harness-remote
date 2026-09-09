@@ -1940,9 +1940,9 @@
     flex: 1 1 140px;
     justify-content: center;
   }
-  /* These two are the only Session mutations reachable from a phone, and 34px misses the platform
-     target guidance the rest of the mobile chrome already follows. */
+  /* Session actions follow the same touch target size as the rest of the mobile chrome. */
   .hr-session-actions > .tdw-icon-button { width: 44px; height: 44px; }
+  .hr-session-actions > .hr-session-release { min-height: 44px; }
   .hr-session-actions { gap: 6px; }
   .hr-session-action-field input { min-height: 44px; font-size: 16px; }
   .hr-session-action-buttons > .tdw-button { min-height: 44px; }

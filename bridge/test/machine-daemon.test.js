@@ -68,6 +68,24 @@ test("one machine daemon represents ACP and OpenCode concurrently", async () => 
   assert.equal(snapshot.agents.find((host) => host.id === "opencode").processID, 5151)
 })
 
+test("Codex release delegates to an owning service even when daemon claim bookkeeping is cold", async () => {
+  const daemon = new MachineDaemon({ id: "machine_release", name: "release" })
+  daemon.registerAcpHost({ id: "codex", agent: new FakeAcp() })
+  daemon.registerAcpHost({ id: "pi", agent: new FakeAcp() })
+  let options
+  const calls = []
+  createMachineDaemonServer({
+    daemon, config: { backend: "codex", port: 4097 }, primaryAcp: new FakeAcp(),
+    createServer: (value) => ({ acpService: { async releaseSession(id) { calls.push(id); return { released: true, sessionID: id } } }, emit() {} }),
+    createRouter: () => ({}), createClaimServer: (value) => { options = value; return {} },
+    createLaunchServer: ({ innerServer }) => innerServer, createModelServer: ({ innerServer }) => innerServer,
+    createFinishServer: ({ innerServer }) => innerServer, createWorkThreadServerFactory: ({ innerServer }) => innerServer
+  })
+  await options.releaseSession("codex", "native-1")
+  assert.deepEqual(calls, ["native-1"])
+  await assert.rejects(() => options.releaseSession("pi", "native-1"), (error) => error.code === "unsupported_agent")
+})
+
 test("eager managed hosts start concurrently rather than serially", async () => {
   const daemon = new MachineDaemon({ id: "machine_test", name: "workstation" })
   let firstStarted = false
@@ -491,4 +509,30 @@ test("daemon shutdown closes ACP and terminates managed HTTP hosts", () => {
   daemon.close()
   assert.equal(acp.closed, true)
   assert.deepEqual(openCode.stopped, ["SIGTERM"])
+})
+
+test("release is fenced while prompt model discovery is pending", async () => {
+  const daemon = new MachineDaemon({ id: "machine_release_race", name: "release" })
+  let finishModel, enteredModel
+  const modelGate = new Promise(resolve => { finishModel = resolve })
+  const entered = new Promise(resolve => { enteredModel = resolve })
+  daemon.registerAcpHost({ id: "codex", agent: new FakeAcp(), modelCatalog: {
+    async resolve(model) { enteredModel(); await modelGate; return model }
+  } })
+  let options, releases = 0, prompts = 0
+  createMachineDaemonServer({
+    daemon, config: { backend: "codex", port: 4097 }, primaryAcp: new FakeAcp(),
+    createServer: () => ({ acpService: { async releaseSession() { releases++ }, async prompt() { prompts++ } }, emit() {} }),
+    createRouter: () => ({}), createClaimServer: value => { options = value; return {} },
+    createLaunchServer: ({ innerServer }) => innerServer, createModelServer: ({ innerServer }) => innerServer,
+    createFinishServer: ({ innerServer }) => innerServer, createWorkThreadServerFactory: ({ innerServer }) => innerServer
+  })
+  const prompting = options.promptSession("codex", "native-1", { text: "hello", model: { providerID: "codex", modelID: "test" } })
+  await entered
+  await assert.rejects(options.releaseSession("codex", "native-1"), error => error.code === "session_release_rejected")
+  assert.equal(releases, 0)
+  finishModel(); await prompting
+  assert.equal(prompts, 1)
+  await options.releaseSession("codex", "native-1")
+  assert.equal(releases, 1)
 })

@@ -81,6 +81,44 @@ async function postStop(port, body = stopBody()) {
   })
 }
 
+async function postRelease(port, body = {}) {
+  return fetch(`http://127.0.0.1:${port}/v1/agents/codex/session/native-123/release`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body)
+  })
+}
+
+test("native Session release authenticates, succeeds, and maps release conflicts to 409", async () => withLedger(async (operationLedger) => {
+  const calls = []
+  const server = createSessionClaimServer({
+    innerServer: new EventEmitter(),
+    config: { username: "user", password: "secret", corsOrigins: [] },
+    operationLedger,
+    async releaseSession(agentID, sessionID) { calls.push([agentID, sessionID]) }
+  })
+  const port = await listen(server)
+  try {
+    const unauthorized = await postRelease(port)
+    assert.equal(unauthorized.status, 401)
+    const success = await fetch(`http://127.0.0.1:${port}/v1/agents/codex/session/native-123/release`, {
+      method: "POST", headers: { Authorization: `Basic ${Buffer.from("user:secret").toString("base64")}`, "Content-Type": "application/json" }, body: "{}"
+    })
+    assert.equal(success.status, 200)
+    assert.deepEqual(await success.json(), { released: true, sessionID: "native-123" })
+    assert.deepEqual(calls, [["codex", "native-123"]])
+  } finally { await close(server) }
+}))
+
+test("native Session release reports a conflict", async () => {
+  const server = createSessionClaimServer({
+    innerServer: new EventEmitter(), config: { username: "", password: "", corsOrigins: [] },
+    async releaseSession() { const error = new Error("Cannot release a busy Session"); error.code = "session_release_rejected"; throw error }
+  })
+  const port = await listen(server)
+  try { assert.equal((await postRelease(port)).status, 409) } finally { await close(server) }
+})
+
 test("native Session claim targets the exact agent and existing Session id", async () => {
   const calls = []
   const server = createSessionClaimServer({
@@ -511,7 +549,7 @@ test("native Session operation routes accept POST only", async () => {
   })
   const port = await listen(server)
   try {
-    for (const action of ["claim", "prompt", "command", "stop"]) {
+    for (const action of ["claim", "prompt", "command", "stop", "release"]) {
       const response = await fetch(`http://127.0.0.1:${port}/v1/agents/pi/session/native-1/${action}`)
       assert.equal(response.status, 405)
       assert.equal(response.headers.get("allow"), "POST, OPTIONS")
