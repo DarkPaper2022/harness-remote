@@ -2276,3 +2276,41 @@ test("lightweight Session index preserves non-paginated behavior across ACP back
     }
   }
 })
+
+
+test("external Codex metadata reads never claim the writer, but prompts still require it", async () => {
+  class LockedAcp extends EventEmitter {
+    loads = 0
+    async start() {}
+    async listSessions() {
+      return [{ sessionId: "locked", cwd: process.cwd(), updatedAt: "2026-09-10T00:00:00Z" }]
+    }
+    async request(method) {
+      if (method === "session/load") {
+        this.loads++
+        throw new Error("thread locked already has an active writer")
+      }
+      return {}
+    }
+    notify() {}
+  }
+  const historyLoader = async () => [{
+    info: { id: "native", role: "user", sessionID: "locked", time: { created: 1 } },
+    parts: [{ id: "native:text", type: "text", text: "Visible history" }]
+  }]
+  historyLoader.readOnlyExternalMetadata = true
+  const acp = new LockedAcp()
+  const service = new AcpService(acp, { historyLoader })
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const [messages, models, commands, actions] = await Promise.all([
+      service.messages("locked"), service.models("locked"), service.commands("locked"), service.actions("locked")
+    ])
+    assert.equal(messages[0].parts[0].text, "Visible history")
+    assert.deepEqual([models, commands, actions], [[], [], []])
+    assert.equal(acp.loads, 0)
+  }
+  await assert.rejects(service.models("missing"), /session not found/)
+  await assert.rejects(service.prompt("locked", "Try to write"), /active writer/)
+  assert.equal(acp.loads, 1, "writing still asks the native harness for ownership")
+  assert.deepEqual(await service.models("locked"), [], "a rejected prompt must not leave false ownership")
+})

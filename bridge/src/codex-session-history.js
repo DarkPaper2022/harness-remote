@@ -205,5 +205,7 @@ export function createCodexHistoryLoader(sessionRoot = path.join(homedir(), ".co
     return readCodexPage(file, sessionID, options)
   }
 
+  // Reading metadata must not take the single-writer lock from a desktop/CLI client.
+  loadCodexHistory.readOnlyExternalMetadata = true
   return loadCodexHistory
 }

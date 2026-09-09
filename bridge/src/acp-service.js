@@ -985,13 +985,21 @@ export class AcpService {
     return this.#todos.get(sessionID) ?? []
   }
 
+  async #readOnlyExternalMetadata(sessionID) {
+    if (!this.#historyLoader?.readOnlyExternalMetadata || !this.#journalBacked(sessionID)) return false
+    await this.#requireSession(sessionID)
+    return this.#journalBacked(sessionID)
+  }
+
   async models(sessionID) {
+    if (await this.#readOnlyExternalMetadata(sessionID)) return []
     await this.#loadForConfigOptions(sessionID)
     const option = this.#configOptions.get(sessionID)?.find((item) => item.id === "model")
     return option?.options?.map((candidate) => ({ ...candidate, currentValue: candidate.value === option.currentValue })) ?? []
   }
 
   async actions(sessionID) {
+    if (await this.#readOnlyExternalMetadata(sessionID)) return []
     if (!this.#commandCatalogs.has(sessionID)) {
       await this.#load(sessionID, true, true)
       await this.#waitForCommandCatalog(sessionID)
@@ -1005,6 +1013,7 @@ export class AcpService {
   // GET /command. Without that fallback the picker is empty until a session loads.
   async commands(sessionID) {
     if (sessionID) {
+      if (await this.#readOnlyExternalMetadata(sessionID)) return []
       if (!this.#commandCatalogs.has(sessionID)) {
         await this.#load(sessionID, true, true)
         await this.#waitForCommandCatalog(sessionID)
