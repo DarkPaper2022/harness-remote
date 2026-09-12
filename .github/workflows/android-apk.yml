@@ -103,22 +103,9 @@ jobs:
         run: ./gradlew assembleRelease --stacktrace --no-daemon
         working-directory: web/android
 
-      - name: Build test APK (debug signed)
-        run: ./gradlew assembleDebug --stacktrace --no-daemon
-        working-directory: web/android
-
-      - name: Verify test APK signature
-        run: |
-          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose web/android/app/build/outputs/apk/debug/app-debug.apk
-
-      - name: Upload test APK artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: harness-remote-debug-apk-v${{ steps.version.outputs.app_version }}
-          path: web/android/app/build/outputs/apk/debug/app-debug.apk
-
-      - name: Require signing secrets for tagged release
-        if: startsWith(github.ref, 'refs/tags/v')
+      # Every downloadable APK is an update candidate. Requiring the fork's persistent key here
+      # prevents workflow_dispatch builds from silently falling back to an incompatible debug key.
+      - name: Require release signing secrets
         run: |
           test -n "$ANDROID_KEYSTORE_BASE64" || (echo "Missing ANDROID_KEYSTORE_BASE64" && exit 1)
           test -n "$ANDROID_KEYSTORE_PASSWORD" || (echo "Missing ANDROID_KEYSTORE_PASSWORD" && exit 1)
@@ -126,12 +113,10 @@ jobs:
           test -n "$ANDROID_KEY_PASSWORD" || (echo "Missing ANDROID_KEY_PASSWORD" && exit 1)
 
       - name: Decode Android release keystore
-        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' && env.ANDROID_KEYSTORE_PASSWORD != '' && env.ANDROID_KEY_ALIAS != '' && env.ANDROID_KEY_PASSWORD != '' }}
         run: |
           echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > web/android/release.keystore
 
       - name: Sign release APK
-        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' && env.ANDROID_KEYSTORE_PASSWORD != '' && env.ANDROID_KEY_ALIAS != '' && env.ANDROID_KEY_PASSWORD != '' }}
         run: |
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" sign \
             --ks web/android/release.keystore \
@@ -142,28 +127,20 @@ jobs:
             web/android/app/build/outputs/apk/release/app-release-unsigned.apk
 
       - name: Verify release APK signature
-        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' && env.ANDROID_KEYSTORE_PASSWORD != '' && env.ANDROID_KEY_ALIAS != '' && env.ANDROID_KEY_PASSWORD != '' }}
         run: |
           "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose web/android/app/build/outputs/apk/release/app-release-signed.apk
 
       # A file's basename becomes its release asset name, and Gradle's app-release-signed.apk names
       # neither the app nor the version — next to the desktop artifacts on a release it reads like it
-      # belongs to a different project. Rename it to the shape they use,
-      # Harness-Remote-<version>-<platform>[-unsigned].<ext>, keeping -unsigned meaningful: the APK
-      # only carries the suffix when the signing secrets were absent.
+      # belongs to a different project. Rename it to the same shape as the desktop artifacts.
       - name: Select release APK path
         id: apk
         env:
           APP_VERSION: ${{ steps.version.outputs.app_version }}
         run: |
           out=web/android/app/build/outputs/apk/release
-          if [ -f "$out/app-release-signed.apk" ]; then
-            source="$out/app-release-signed.apk"
-            name="Harness-Remote-$APP_VERSION-android.apk"
-          else
-            source="$out/app-release-unsigned.apk"
-            name="Harness-Remote-$APP_VERSION-android-unsigned.apk"
-          fi
+          source="$out/app-release-signed.apk"
+          name="Harness-Remote-$APP_VERSION-android.apk"
           mv "$source" "$out/$name"
           echo "path=$out/$name" >> "$GITHUB_OUTPUT"
 

@@ -11,6 +11,7 @@
 
 - 外部 Codex 会话的模型、命令和操作列表查询不再调用 session/load，避免手机查看活动会话时触发 active writer 错误。历史仍读取原生日志，主动接续仍需取得原生写锁。
 - 服务专用 Codex 包装器沿用 API key、禁止自动弹出 OAuth 浏览器，并使用主机 Codex CLI。
+- Android 下载构建强制使用本 fork 的固定 release keystore；私钥与口令只保存在 GitHub Actions Secrets 及本机私有备份，不进入 Git。由 `web/package.json` 推导 `versionCode`，每次 Android 发布都要递增版本。
 
 `origin` 指向本 fork，`upstream` 指向原仓库。`darkpaper` 是本 fork 的默认维护分支，`main` 保留上游版本。维护分支初始基线为 `78b0e1394883b0197b27354bddf003cf3f8deaf6`，不自动升级运行中的服务。日常开发推送 origin/darkpaper；同步前保持工作区干净，然后：
 
