@@ -1,0 +1,10 @@
+.tdw-conversation-tools { display: flex; align-items: center; gap: 6px; grid-column: 2; grid-row: 1; }
+.hr-session-history-refresh { position: relative; display: inline-flex; align-items: center; flex: none; min-height: 44px; }
+.hr-session-history-refresh-button { min-width: 44px; min-height: 44px; }
+.hr-session-history-refresh-status, .hr-session-history-refresh-error {
+  position: absolute; top: 100%; right: 0; z-index: 20; width: max-content; max-width: 220px;
+  padding: 6px 10px; border-radius: 6px; background: var(--td3-chrome, #222);
+  font-size: 0.78rem; line-height: 1.4;
+}
+.hr-session-history-refresh-status { color: var(--td3-green-text); }
+.hr-session-history-refresh-error { color: var(--td3-red-text); }

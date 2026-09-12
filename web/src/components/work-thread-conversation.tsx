@@ -30,6 +30,7 @@ import { ModelPicker, modelOptionKey } from "./model-picker"
 import { TaskDeskConversation } from "./taskdesk-conversation"
 import { TaskDeskMessageContent } from "./taskdesk-message-content"
 import { WorkThreadAttention } from "./work-thread-attention"
+import { SessionHistoryRefresh } from "./session-history-refresh"
 
 const INITIAL_PAGE_SIZE = 200
 const OLDER_PAGE_SIZE = 500
@@ -647,11 +648,14 @@ export function WorkThreadConversation({
 
   const hasMore = Object.values(feeds).some((feed) => feed.hasMore && feed.before)
 
-  const refreshCurrentTail = useCallback(async (sourceConversation?: ConversationRuntime) => {
+  const refreshCurrentTail = useCallback(async (sourceConversation?: ConversationRuntime, explicit = false) => {
     const currentConversation = sourceConversation ?? conversationRef.current
     const turn = currentConversation.currentTurn
     const session = conversationTurnSessionID(turn)
-    if (!session) return
+    if (!session) {
+      if (explicit) throw new Error("Session history is not available yet")
+      return
+    }
     const currentAgents = agentsRef.current
     const agentID = agentForTurn(currentConversation, turn)
     const target: SessionTarget = {
@@ -660,9 +664,13 @@ export function WorkThreadConversation({
       directory: turn?.directory || currentConversation.directory,
       config: configForAgent(baseConfig, currentAgents, agentID)
     }
+    let failure: unknown
     await tailRefreshRef.current(async () => {
       try {
+        // Re-read the current tail through the read-only path. refreshHistory=true can replay an
+        // ACP session on some backends; an explicit UI refresh must never claim or reset a writer.
         const page = await controller.loadMessagePage(target.config, session, target.directory, undefined, INITIAL_PAGE_SIZE, false)
+        if (conversationRef.current.id !== currentConversation.id) return
         setFeeds((current) => {
           const existing = current[session]
           if (!existing) return { ...current, [session]: { messages: page.messages, before: page.before, hasMore: page.hasMore } }
@@ -672,12 +680,15 @@ export function WorkThreadConversation({
           if (messages === existing.messages && hasMore === existing.hasMore && before === existing.before) return current
           return { ...current, [session]: { ...existing, messages, hasMore, before } }
         })
+        if (explicit) setTranscriptError(null)
       } catch (reason) {
+        failure = reason
         if (isTransportFailure(reason)) onConnectionIssueRef.current?.()
         // Live refresh is opportunistic. The existing transcript remains visible and the slow
         // reconciliation path will retry without clearing or replacing it.
       }
-    })
+    }, explicit)
+    if (explicit && failure !== undefined) throw failure
   }, [baseConfig, controller])
 
   const refreshAttention = useCallback(async (sourceConversation?: ConversationRuntime) => {
@@ -737,6 +748,19 @@ export function WorkThreadConversation({
     }, delay)
     return () => window.clearInterval(timer)
   }, [working, replySettling, reconcile, refreshAttention, interactionEnabled])
+
+  useEffect(() => {
+    if (!interactionEnabled) return
+    const resume = () => {
+      if (document.visibilityState === "visible") void reconcile()
+    }
+    document.addEventListener("visibilitychange", resume)
+    window.addEventListener("pageshow", resume)
+    return () => {
+      document.removeEventListener("visibilitychange", resume)
+      window.removeEventListener("pageshow", resume)
+    }
+  }, [interactionEnabled, reconcile])
 
   useEffect(() => {
     const wasEnabled = priorInteractionEnabledRef.current
@@ -1062,7 +1086,10 @@ export function WorkThreadConversation({
             {modelError ? <small className="tdw-field-note" title={modelError}>Model catalog unavailable. Sending is paused until a model can be verified.</small> : null}
           </label>
         </div>
-        <ConversationStatePill working={working || replyPending || sending || replySettling || modelBootstrapBlocked} attention={hasAttention} workingLabel={conversationStateLabel} startedAt={sending ? undefined : conversation.currentTurn?.startedAt} status={conversation.status} detail={conversation.error?.message || undefined} />
+        <div className="tdw-conversation-tools">
+          <ConversationStatePill working={working || replyPending || sending || replySettling || modelBootstrapBlocked} attention={hasAttention} workingLabel={conversationStateLabel} startedAt={sending ? undefined : conversation.currentTurn?.startedAt} status={conversation.status} detail={conversation.error?.message || undefined} />
+          <SessionHistoryRefresh key={conversation.id} onRefresh={() => refreshCurrentTail(undefined, true)} disabled={!interactionEnabled || !currentSessionID} />
+        </div>
       </div>
 
       {routeChanged ? (

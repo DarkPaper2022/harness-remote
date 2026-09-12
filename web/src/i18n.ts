@@ -312,6 +312,9 @@ type TranslationKey =
   | 'sf.refresh'
   | 'sf.refreshingMachines'
   | 'sf.refreshingSessions'
+  | 'sf.refreshHistory'
+  | 'sf.refreshingHistory'
+  | 'sf.historyRefreshed'
   | 'sf.machineCount'
   | 'sf.connecting'
   | 'sf.mainNavigation'
@@ -790,6 +793,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.refresh': 'Refresh',
     'sf.refreshingMachines': 'Refreshing machines',
     'sf.refreshingSessions': 'Refreshing Sessions',
+    'sf.refreshHistory': 'Refresh session history',
+    'sf.refreshingHistory': 'Refreshing session history',
+    'sf.historyRefreshed': 'History refreshed',
     'sf.machineCount': '{online}/{total} machines',
     'sf.connecting': 'Connecting',
     'sf.mainNavigation': 'Main navigation',
@@ -1268,6 +1274,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.refresh': 'Aggiorna',
     'sf.refreshingMachines': 'Aggiornamento macchine',
     'sf.refreshingSessions': 'Aggiornamento sessioni',
+    'sf.refreshHistory': 'Aggiorna cronologia sessione',
+    'sf.refreshingHistory': 'Aggiornamento cronologia sessione',
+    'sf.historyRefreshed': 'Cronologia aggiornata',
     'sf.machineCount': '{online}/{total} macchine',
     'sf.connecting': 'Connessione',
     'sf.mainNavigation': 'Navigazione principale',
@@ -1698,6 +1707,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.refresh': '重新整理',
     'sf.refreshingMachines': '正在重新整理機器',
     'sf.refreshingSessions': '正在重新整理工作階段',
+    'sf.refreshHistory': '重新整理工作階段記錄',
+    'sf.refreshingHistory': '正在重新整理工作階段記錄',
+    'sf.historyRefreshed': '工作階段記錄已更新',
     'sf.machineCount': '{online}/{total} 部機器',
     'sf.connecting': '連線中',
     'sf.mainNavigation': '主要導覽',
@@ -2173,6 +2185,9 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.refresh': '刷新',
     'sf.refreshingMachines': '正在刷新机器',
     'sf.refreshingSessions': '正在刷新会话',
+    'sf.refreshHistory': '刷新会话历史',
+    'sf.refreshingHistory': '正在刷新会话历史',
+    'sf.historyRefreshed': '会话历史已刷新',
     'sf.machineCount': '{online}/{total} 台机器',
     'sf.connecting': '连接中',
     'sf.mainNavigation': '主导航',

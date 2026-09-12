@@ -35,3 +35,28 @@ test("an in-flight tail read cannot swallow the final authoritative transcript r
   assert.equal(reads, 2, "the burst should coalesce into the in-flight read plus one trailing read")
   assert.equal(visibleText, authoritativeText, "the still-open Session must converge to the authoritative final transcript")
 })
+
+test("manual refresh survives stream events and completes before trailing automatic reads", async () => {
+  const refresh = createCoalescedTailRefresh()
+  const calls = []
+  let releaseFirst, releaseTrailing
+  const firstGate = new Promise(resolve => { releaseFirst = resolve })
+  const trailingGate = new Promise(resolve => { releaseTrailing = resolve })
+  const first = refresh(async () => { calls.push("first"); await firstGate })
+  const manual = refresh(async () => { calls.push("manual") }, true)
+  const trailing = refresh(async () => { calls.push("trailing"); await trailingGate })
+  releaseFirst()
+  await manual
+  assert.ok(calls.includes("manual"), "stream events must not replace the explicit request")
+  releaseTrailing()
+  await Promise.all([first, trailing])
+  assert.deepEqual(calls, ["first", "manual", "trailing"])
+})
+
+test("manual refresh failure is reported to its caller without breaking live refresh", async () => {
+  const refresh = createCoalescedTailRefresh()
+  await assert.rejects(refresh(async () => { throw new Error("offline") }, true), /offline/)
+  let recovered = false
+  await refresh(async () => { recovered = true })
+  assert.equal(recovered, true)
+})
