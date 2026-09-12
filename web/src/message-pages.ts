@@ -51,7 +51,14 @@ export function mergeLatestMessagePage(existing: MessageEnvelope[], latest: Mess
     merged.push(message)
     changed = true
   }
-  return changed ? merged : existing
+  // A delayed final answer may arrive after the next user message was already displayed.
+  // Restore chronological order before the timeline splits messages into user-led turns.
+  // Stable sorting keeps wire order for equal timestamps; unknown dates keep their old order.
+  return changed ? merged.sort((left, right) => {
+    const a = Number(left.info.time?.created)
+    const b = Number(right.info.time?.created)
+    return Number.isFinite(a) && a > 0 && Number.isFinite(b) && b > 0 ? a - b : 0
+  }) : existing
 }
 
 /** Add an older page once, keeping the current tail and its object identities intact. */

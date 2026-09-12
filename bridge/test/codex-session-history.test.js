@@ -45,6 +45,7 @@ test("reads a Codex rollout as the conversation the user saw", async () => {
       ],
       "instruction blocks and bookkeeping events must stay out of the transcript"
     )
+    assert.equal(messages[2].parts[0].phase, "commentary")
     assert.equal(messages[0].info.time.created, Date.parse("2026-08-07T09:28:51.290Z"))
     assert.equal(new Set(messages.map((message) => message.info.id)).size, messages.length, "ids must be unique")
   } finally {
@@ -74,6 +75,7 @@ test("reads current Codex item-completed rollout events without exposing model i
       ]
     )
 
+    assert.equal(messages.at(-1).parts[0].phase, "final_answer")
     const page = await loader.page(sessionID, { limit: 2 })
     assert.deepEqual(page.messages, messages.slice(-2))
     assert.equal(page.hasMore, true)

@@ -28,3 +28,5 @@ git push origin darkpaper
 释放会话通过已认证的 `POST /v1/agents/codex/session/:id/release` 实现，目前支持 Linux/macOS 服务端。Codex CLI 0.153.4 的 `thread/unsubscribe` 会延迟约 30 分钟卸载，因此 daemon 为每个打开的 Codex 会话维护独立适配器进程组，释放时等待该组退出；其他会话继续运行。相应代价是每个打开的会话有独立进程开销，闲置后可主动释放。Windows 保留原适配器模式，释放接口明确返回不支持。模型目录查询继续使用独立的技术会话。
 
 相关回归测试在 `bridge/test/session-acp-client.test.js`、`bridge/test/acp-process-group.test.js`、`bridge/test/acp-session-claim.test.js` 和 HTTP daemon 测试中。浏览器验收在 web 目录运行 `node scripts/session-release-smoke.mjs`。进程组测试只操作自身创建的进程；真实 Codex 验收应使用专用测试会话，验证第二客户端在释放前冲突、释放后立即恢复。
+
+Codex 最终回复展示：实时 ACP 流与原生日志均保留 `commentary` / `final_answer` 标记；最终文字不依赖可能滞后的 running 状态，也不会因后续工具事件被归入 Activity。迟到消息按创建时间插回原来的位置，避免最终回复落到下一轮用户消息之后。此修复需要客户端和后端同时更新。

@@ -48,7 +48,14 @@ export function groupConversationParts(parts: MessagePart[], options: Conversati
   for (let index = 0; index < parts.length; index += 1) {
     const part = parts[index]
     const workingText = part.type === "text" && lastActivity >= 0 && index < lastActivity
-    const kind = options.forceActivity || isConversationActivityPart(part) || workingText ? "activity" : "content"
+    // Codex explicitly labels commentary and final output. These protocol phases take precedence
+    // over the runtime's transient `forceActivity` flag: a stale running state must not hide a
+    // completed final answer, and a commentary sentence must not leak into normal chat content.
+    const kind = part.type === "text" && part.phase === "final_answer"
+      ? "content"
+      : part.type === "text" && part.phase === "commentary"
+        ? "activity"
+        : options.forceActivity || isConversationActivityPart(part) || workingText ? "activity" : "content"
     const previous = groups[groups.length - 1]
 
     if (previous?.kind === kind) {

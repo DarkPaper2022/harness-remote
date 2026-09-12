@@ -95,3 +95,15 @@ test("Session conversation exposes bounded older-history loading without snappin
   assert.match(historyStyles, /\.uw-history-load/)
   assert.match(historyStyles, /overflow-anchor: none/)
 })
+
+test("a delayed final answer is inserted before the next user turn", () => {
+  const user1 = message("user-1"); user1.info.role = "user"; user1.info.time.created = 10
+  const activity = message("activity"); activity.info.time.created = 20
+  const user2 = message("user-2"); user2.info.role = "user"; user2.info.time.created = 40
+  const final = message("final", "Completed answer"); final.info.time.created = 30
+  final.parts[0].phase = "final_answer"
+  const merged = mergeLatestMessagePage([user1, activity, user2], [activity, final, user2])
+  assert.deepEqual(merged.map(m => m.info.id), ["user-1", "activity", "final", "user-2"])
+  assert.equal(merged[0], user1)
+  assert.equal(mergeLatestMessagePage(merged, [activity, final, user2]), merged)
+})

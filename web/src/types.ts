@@ -197,6 +197,8 @@ export type MessagePart = {
   id: string
   messageID?: string
   type: string
+  /** Codex ACP phase for text output; absent on older/other harness payloads. */
+  phase?: "commentary" | "final_answer"
   text?: string
   tool?: string
   callID?: string

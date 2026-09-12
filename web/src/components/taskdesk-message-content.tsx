@@ -133,10 +133,13 @@ function cleanReportedErrorText(value: string): string {
 }
 
 function hasTerminalAssistantText(parts: MessagePart[], reportedError = ""): boolean {
+  if (parts.some((part) => part.type === "text" && part.phase === "final_answer"
+    && part.text?.trim() && !(reportedError && textMirrorsReportedError(part.text, reportedError)))) return true
   for (let index = parts.length - 1; index >= 0; index -= 1) {
     const part = parts[index]
     if (isInternalProtocolPart(part)) continue
     if (part.type === "text") {
+      if (part.phase === "commentary") continue
       if (typeof part.text === "string" && part.text.trim()) {
         if (reportedError && textMirrorsReportedError(part.text, reportedError)) continue
         return true

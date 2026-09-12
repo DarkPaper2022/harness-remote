@@ -2033,6 +2033,9 @@ export class AcpService {
     if (!image && (update.content?.type !== "text" || !update.content.text)) return
     const role = update.sessionUpdate === "user_message_chunk" ? "user" : "assistant"
     const partType = thought ? "reasoning" : image ? "file" : "text"
+    const nativePhase = update._meta?.codex?.phase
+    const phase = partType === "text" && (nativePhase === "commentary" || nativePhase === "final_answer")
+      ? nativePhase : undefined
     // Acknowledgements only suppress a live echo of the prompt we just recorded;
     if (role === "assistant" && !replaying && this.#cancelledSessions.has(sessionId)) return
     if (role === "assistant" && !replaying && !this.#active.has(sessionId) && !this.#promptedSessions.has(sessionId)) return
@@ -2072,7 +2075,7 @@ export class AcpService {
         mime: image.mime,
         url: `data:${image.mime};base64,${image.data}`
       })
-    } else if (previous?.type === partType) {
+    } else if (previous?.type === partType && previous.phase === phase) {
       previous.text += update.content.text
     } else {
       message.parts.push({
@@ -2080,6 +2083,7 @@ export class AcpService {
         messageID,
         type: partType,
         text: update.content.text,
+        ...(phase ? { phase } : {}),
         ...(partType === "reasoning" ? { time: { start: now } } : {})
       })
     }

@@ -62,6 +62,29 @@ test("a live assistant turn keeps every streamed part inside one running Activit
   assert.deepEqual(groups[0].parts.map((item) => item.id), parts.map((item) => item.id))
 })
 
+test("explicit Codex final answer remains visible while runtime state is stale", () => {
+  const groups = groupConversationParts([
+    part("commentary", "text", { text: "I am checking the files.", phase: "commentary" }),
+    part("final", "text", { text: "The fix is complete.", phase: "final_answer" })
+  ], { forceActivity: true, forceRunning: true })
+  assert.deepEqual(groups.map((group) => group.kind), ["activity", "content"])
+  assert.deepEqual(groups[1].parts.map((item) => item.id), ["final"])
+})
+
+test("a final answer stays visible when a tool arrives late", () => {
+  const groups = groupConversationParts([
+    part("final", "text", { text: "Done.", phase: "final_answer" }),
+    part("late-tool", "tool", { tool: "Read", state: { status: "completed" } })
+  ], { forceActivity: true, forceRunning: true })
+  assert.deepEqual(groups.map((group) => group.kind), ["content", "activity"])
+  assert.equal(groups[0].parts[0].text, "Done.")
+})
+
+test("unmarked text keeps the existing live Activity behavior", () => {
+  const groups = groupConversationParts([part("text", "text", { text: "Still working." })], { forceActivity: true, forceRunning: true })
+  assert.equal(groups[0].kind, "activity")
+})
+
 test("a failed tool call stays local and does not mark successful Activity as failed", () => {
   const groups = groupConversationParts([
     part("tool-1", "tool", { tool: "Shell", state: { status: "error", error: "command failed" } }),

@@ -54,6 +54,8 @@ function messageFromRecord(sessionID, record, offset) {
   // lines, unlike the old ordinal-based id.
   const messageID = `${sessionID}:byte:${offset}`
   const created = Date.parse(record.timestamp ?? "")
+  const nativePhase = completedItem?.phase ?? payload.phase
+  const phase = nativePhase === "commentary" || nativePhase === "final_answer" ? nativePhase : undefined
   return {
     info: {
       id: messageID,
@@ -61,7 +63,7 @@ function messageFromRecord(sessionID, record, offset) {
       sessionID,
       time: { created: Number.isFinite(created) ? created : Date.now() }
     },
-    parts: [{ id: `${messageID}:${type}:0`, messageID, type, text }]
+    parts: [{ id: `${messageID}:${type}:0`, messageID, type, text, ...(type === "text" && phase ? { phase } : {}) }]
   }
 }
 

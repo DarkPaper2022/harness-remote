@@ -18,7 +18,7 @@ ${styles}
 const config = { backend: 'codex', agentId: 'codex', host: '127.0.0.1', port: 4500, username: 'test', password: 'test' }
 const agents = [{ id: 'codex', label: 'Codex', backend: 'codex', transport: 'acp', managed: true, state: 'available', capabilities: { sessions: true, prompt: true, models: true } }]
 const conversation = { id: 'conversation-1', machineId: 'machine-1', title: 'Refresh smoke', agentId: 'codex', initialPrompt: 'hello', status: 'running', directory: '/work/project', currentTurn: { id: 'turn-1', sequence: 1, agentId: 'codex', sessionId: 'thread-1', directory: '/work/project', status: 'running', prompt: 'hello' }, turns: [{ id: 'turn-1', sequence: 1, agentId: 'codex', sessionId: 'thread-1', directory: '/work/project', status: 'running', prompt: 'hello' }], createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:01Z' }
-const text = (id, value) => ({ info: { id, role: 'assistant', sessionID: 'thread-1', time: { created: Date.now() } }, parts: [{ id: id + '-part', type: 'text', text: value }] })
+const text = (id, value, phase = "commentary") => ({ info: { id, role: 'assistant', sessionID: 'thread-1', time: { created: Date.now() } }, parts: [{ id: id + '-part', type: 'text', text: value, phase }] })
 const user = { info: { id: 'user-1', role: 'user', sessionID: 'thread-1', time: { created: Date.now() - 1 } }, parts: [{ id: 'user-part', type: 'text', text: 'hello' }] }
 let recovered = false, failNext = false, gate = null
 window.refreshStats = { loads: 0, continue: 0, stop: 0, flags: [] }
@@ -32,7 +32,7 @@ const controller = {
     const wait = gate; gate = null
     if (wait) await wait
     if (failNext) { failNext = false; throw new Error('simulated refresh failure') }
-    return { messages: recovered ? [user, text('assistant-1', 'First answer'), text('assistant-2', 'Recovered answer')] : [user, text('assistant-1', 'First answer')], hasMore: false }
+    return { messages: recovered ? [user, text('assistant-1', 'First answer'), text('assistant-2', 'Recovered answer', 'final_answer')] : [user, text('assistant-1', 'First answer')], hasMore: false }
   },
   refreshConversation: async () => conversation,
   continueConversation: async () => { window.refreshStats.continue++; throw new Error('continue must not run') },
@@ -104,6 +104,7 @@ try {
     assert.equal(await page.evaluate(() => window.refreshStats.loads), beforeLoads + 1, 'duplicate clicks must share one in-flight refresh')
     await page.evaluate(() => window.finishRead())
     await page.getByText('Recovered answer', { exact: true }).waitFor()
+    assert.equal(await page.getByText('Recovered answer', { exact: true }).evaluate(node => Boolean(node.closest('details'))), false, 'explicit final text must remain outside Activity while the runtime is still running')
     assert.equal(await page.locator('textarea').inputValue(), 'draft survives refresh failure')
     assert.equal(await page.evaluate(() => window.refreshStats.continue + window.refreshStats.stop), 0)
 

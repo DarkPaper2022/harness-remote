@@ -2314,3 +2314,30 @@ test("external Codex metadata reads never claim the writer, but prompts still re
   assert.equal(acp.loads, 1, "writing still asks the native harness for ownership")
   assert.deepEqual(await service.models("locked"), [], "a rejected prompt must not leave false ownership")
 })
+
+test("Codex streaming preserves commentary/final boundaries even before the prompt completes", async () => {
+  class PhaseAcp extends EventEmitter {
+    async start() {}
+    async listSessions() { return [{sessionId:"phase-session",cwd:"/repo"}] }
+    async request(method) {
+      if (method === "session/prompt") return new Promise(resolve => { this.finish = resolve })
+      return {}
+    }
+  }
+  const acp = new PhaseAcp()
+  const service = new AcpService(acp)
+  await service.claimSession("phase-session")
+  await service.prompt("phase-session", "test")
+  for (const [phase, text] of [["commentary", "Checking. "], ["final_answer", "Final "], ["final_answer", "answer."]]) {
+    acp.emit("notification", {method:"session/update",params:{sessionId:"phase-session",update:{
+      sessionUpdate:"agent_message_chunk",messageId:"same-message",content:{type:"text",text},_meta:{codex:{phase}}
+    }}})
+  }
+  try {
+    const page = await service.messagePage("phase-session")
+    const parts = page.messages.filter(message => message.info.role === "assistant").flatMap(message => message.parts)
+    assert.deepEqual(parts.map(({phase,text}) => ({phase,text})), [
+      {phase:"commentary",text:"Checking. "}, {phase:"final_answer",text:"Final answer."}
+    ])
+  } finally { acp.finish?.({stopReason:"end_turn"}) }
+})
