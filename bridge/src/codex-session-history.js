@@ -55,7 +55,9 @@ function messageFromRecord(sessionID, record, offset) {
   const messageID = `${sessionID}:byte:${offset}`
   const created = Date.parse(record.timestamp ?? "")
   const nativePhase = completedItem?.phase ?? payload.phase
-  const phase = nativePhase === "commentary" || nativePhase === "final_answer" ? nativePhase : undefined
+  const phase = nativePhase === "final"
+    ? "final_answer"
+    : nativePhase === "commentary" || nativePhase === "final_answer" ? nativePhase : undefined
   return {
     info: {
       id: messageID,

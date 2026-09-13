@@ -927,13 +927,12 @@ export class AcpService {
           cachedMessages,
           this.#transientFailureMessageIDs.get(sessionID)
         )
-        const messages = this.#isBusy(sessionID)
-          ? mergeFragmentedPiSnapshot(mergeExternalHistory(persistedMessages, cachedMessages))
-          // Idle normally means "journal only". The one exception is a live provider failure the
-          // journal has not flushed yet; keep that exact failed turn until the persisted copy exists.
-          : pendingFailureTurn.length
-            ? mergeFragmentedPiSnapshot(mergeExternalHistory(persistedMessages, pendingFailureTurn))
-            : persistedMessages
+        // ACP completion can precede the provider journal flush. Keep the live projection during
+        // that gap even after the Session reports idle; replacing it with the older persisted page
+        // makes an already-rendered answer disappear and leaves clients with nothing to recover
+        // until disk catches up. Semantic occurrence matching removes each live item as soon as its
+        // durable counterpart appears, while still retaining temporary failure records.
+        const messages = mergeFragmentedPiSnapshot(mergeExternalHistory(persistedMessages, cachedMessages))
         if (semanticHistorySignature(messages) !== semanticHistorySignature(cachedMessages)) {
           this.#resetActionsForSessionChange(sessionID)
         }
@@ -957,6 +956,7 @@ export class AcpService {
       && !refresh
       && !this.#isBusy(sessionID)
       && !this.#transientFailureMessageIDs.get(sessionID)?.size
+      && !(this.#messages.get(sessionID)?.length)
     ) {
       try {
         let pageOptions = { limit: boundedLimit, before }
@@ -2034,8 +2034,10 @@ export class AcpService {
     const role = update.sessionUpdate === "user_message_chunk" ? "user" : "assistant"
     const partType = thought ? "reasoning" : image ? "file" : "text"
     const nativePhase = update._meta?.codex?.phase
-    const phase = partType === "text" && (nativePhase === "commentary" || nativePhase === "final_answer")
-      ? nativePhase : undefined
+    const phase = partType === "text" && nativePhase === "final"
+      ? "final_answer"
+      : partType === "text" && (nativePhase === "commentary" || nativePhase === "final_answer")
+        ? nativePhase : undefined
     // Acknowledgements only suppress a live echo of the prompt we just recorded;
     if (role === "assistant" && !replaying && this.#cancelledSessions.has(sessionId)) return
     if (role === "assistant" && !replaying && !this.#active.has(sessionId) && !this.#promptedSessions.has(sessionId)) return

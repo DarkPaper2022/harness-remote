@@ -347,9 +347,12 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
           "Cache-Control": "no-cache, no-transform",
           Connection: "keep-alive"
         })
-        response.write(": connected\n\n")
         sseClients += 1
         const unsubscribe = service.subscribe((event) => writeSSE(response, event.type, event))
+        // Subscribe before acknowledging the stream. A turn can emit between the HTTP connection
+        // opening and the listener registration; acknowledging first would make that event
+        // unrecoverable until the client's next safety reconciliation.
+        response.write(": connected\n\n")
         const heartbeat = setInterval(() => response.write(": ping\n\n"), config.heartbeatMs ?? 10_000)
         heartbeat.unref?.()
         request.on("close", () => {

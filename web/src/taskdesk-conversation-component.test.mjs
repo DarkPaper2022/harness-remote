@@ -113,8 +113,16 @@ test("accepted native replies keep settling after an early idle edge", () => {
   assert.match(controller, /REPLY_SETTLE_IDLE_GRACE_MS = 20_000/)
   assert.match(controller, /setAwaitingReplyTurnID\(next\.currentTurn\?\.id \?\? null\)/)
   assert.match(controller, /const replySettling = Boolean/)
+  assert.match(controller, /assistantMessageHasTerminalSignal/)
+  assert.match(controller, /awaitingReplyTurnID[\s\S]*!currentTurnHasTerminalSignal/)
   assert.match(controller, /replySettling \? REPLY_SETTLE_RECONCILE_MS/)
   assert.match(controller, /waiting=\{working \|\| replySettling\}/)
+})
+
+test("a lifecycle event arriving during reconciliation schedules a trailing pass", () => {
+  assert.match(controller, /const reconcileQueuedRef = useRef\(false\)/)
+  assert.match(controller, /if \(reconcileInFlightRef\.current\) \{[\s\S]*reconcileQueuedRef\.current = true/)
+  assert.match(controller, /do \{[\s\S]*\} while \(reconcileQueuedRef\.current\)/)
 })
 
 test("selected ACP lifecycle edges always re-read the mounted transcript", () => {

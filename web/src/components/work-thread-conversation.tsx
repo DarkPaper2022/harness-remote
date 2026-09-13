@@ -122,6 +122,14 @@ function assistantMessageHasSignal(message: WorkThreadMessage): boolean {
   })
 }
 
+function assistantMessageHasTerminalSignal(message: WorkThreadMessage): boolean {
+  if (message.info.role !== "assistant") return false
+  if (message.info.error) return true
+  return message.parts.some((part) =>
+    part.type === "text" && part.phase === "final_answer" && Boolean(part.text?.trim())
+  )
+}
+
 function supportedBackend(value: string, fallback: BackendKind): BackendKind {
   return value === "opencode" || value === "omp" || value === "pi" || value === "claude" || value === "codex"
     ? value
@@ -374,6 +382,7 @@ export function WorkThreadConversation({
   const tailRefreshRef = useRef(createCoalescedTailRefresh())
   const attentionInFlightRef = useRef(false)
   const reconcileInFlightRef = useRef(false)
+  const reconcileQueuedRef = useRef(false)
   const conversationRef = useRef(conversation)
   const agentsRef = useRef(agents)
   const onConversationUpdateRef = useRef(onConversationUpdate)
@@ -457,6 +466,7 @@ export function WorkThreadConversation({
     stopInFlightRef.current = false
     attentionInFlightRef.current = false
     reconcileInFlightRef.current = false
+    reconcileQueuedRef.current = false
   }, [conversation.id, routing?.currentMachineID])
 
   useEffect(() => {
@@ -604,10 +614,16 @@ export function WorkThreadConversation({
       message.taskdesk?.runId === replyTurnID && assistantMessageHasSignal(message)
     )
   }, [timeline, replyTurnID])
+  const currentTurnHasTerminalSignal = useMemo(() => {
+    if (!replyTurnID) return false
+    return timeline.some((message) =>
+      message.taskdesk?.runId === replyTurnID && assistantMessageHasTerminalSignal(message)
+    )
+  }, [timeline, replyTurnID])
 
   const replySettling = Boolean(
     awaitingReplyTurnID
-    && !currentTurnHasAssistantSignal
+    && !currentTurnHasTerminalSignal
     && conversation.status !== "failed"
     && conversation.status !== "cancelled"
   )
@@ -626,7 +642,7 @@ export function WorkThreadConversation({
   useEffect(() => {
     if (!awaitingReplyTurnID) return
     if (
-      currentTurnHasAssistantSignal
+      currentTurnHasTerminalSignal
       || conversation.status === "failed"
       || conversation.status === "cancelled"
     ) {
@@ -644,7 +660,7 @@ export function WorkThreadConversation({
       setReplyPending(false)
     }, REPLY_SETTLE_IDLE_GRACE_MS)
     return () => window.clearTimeout(timer)
-  }, [awaitingReplyTurnID, conversation.status, currentTurnHasAssistantSignal, working])
+  }, [awaitingReplyTurnID, conversation.status, currentTurnHasTerminalSignal, working])
 
   const hasMore = Object.values(feeds).some((feed) => feed.hasMore && feed.before)
 
@@ -721,19 +737,27 @@ export function WorkThreadConversation({
   }, [baseConfig])
 
   const reconcile = useCallback(async () => {
-    if (reconcileInFlightRef.current) return
+    if (reconcileInFlightRef.current) {
+      reconcileQueuedRef.current = true
+      return
+    }
     reconcileInFlightRef.current = true
     try {
-      const prior = conversationRef.current
-      const next = await controller.refreshConversation(baseConfig, prior.id)
-      if (runtimeSignature(next) !== runtimeSignature(prior) || next.title !== prior.title) {
-        onConversationUpdateRef.current(next)
-        conversationRef.current = next
-      }
-      await Promise.all([refreshCurrentTail(next), refreshAttention(next)])
-    } catch (reason) {
-      if (isTransportFailure(reason)) onConnectionIssueRef.current?.()
-      // A transient reconcile failure must never clear a valid conversation.
+      do {
+        reconcileQueuedRef.current = false
+        try {
+          const prior = conversationRef.current
+          const next = await controller.refreshConversation(baseConfig, prior.id)
+          if (runtimeSignature(next) !== runtimeSignature(prior) || next.title !== prior.title) {
+            onConversationUpdateRef.current(next)
+            conversationRef.current = next
+          }
+          await Promise.all([refreshCurrentTail(next), refreshAttention(next)])
+        } catch (reason) {
+          if (isTransportFailure(reason)) onConnectionIssueRef.current?.()
+          // A transient reconcile failure must never clear a valid conversation.
+        }
+      } while (reconcileQueuedRef.current)
     } finally {
       reconcileInFlightRef.current = false
     }

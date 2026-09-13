@@ -22,6 +22,10 @@ test("message paging client consumes bridge cursor headers", () => {
   assert.match(server, /service\.messagePage\(sessionID/)
   assert.match(server, /response\.setHeader\("X-Next-Cursor", page\.before\)/)
   assert.match(server, /response\.setHeader\("X-Has-More", page\.hasMore \? "1" : "0"\)/)
+  assert.ok(
+    server.indexOf("const unsubscribe = service.subscribe") < server.indexOf('response.write(": connected'),
+    "the SSE listener must exist before the bridge acknowledges the connection"
+  )
 })
 
 test("newest-page refresh preserves explicitly loaded older messages", () => {
@@ -57,6 +61,16 @@ test("a divergent native rewrite is not mistaken for a stale prefix", () => {
   const rewritten = message("reply", "final answer from native history")
   const merged = mergeLatestMessagePage([current], [rewritten])
   assert.equal(merged[0], rewritten)
+})
+
+test("same-id tail snapshots cannot withdraw parts already shown by the live stream", () => {
+  const current = message("reply", "Final answer")
+  current.parts.unshift({ id: "tool", messageID: "reply", type: "tool", callID: "call-1", state: { status: "completed" } })
+  const stale = message("reply", "Final answer")
+
+  const merged = mergeLatestMessagePage([current], [stale])
+  assert.deepEqual(merged[0].parts.map((part) => part.id), ["tool", "reply-part"])
+  assert.equal(merged[0].parts[0], current.parts[0])
 })
 
 test("older pages prepend without duplicating the cursor boundary", () => {

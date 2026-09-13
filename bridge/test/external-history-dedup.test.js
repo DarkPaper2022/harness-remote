@@ -89,6 +89,22 @@ test("mergeExternalHistory handles in-place mutated messages without stale signa
   assert.equal(second.length, 2)
 })
 
+test("an older durable snapshot cannot withdraw a completed live assistant part", () => {
+  const user = message("persisted-user", "prompt", 1_000)
+  const activity = message("live-activity", "checked files", 2_000, { phase: "commentary" })
+  activity.info.role = "assistant"
+  const final = message("live-final", "complete answer", 3_000, { phase: "final_answer" })
+  final.info.role = "assistant"
+
+  const delayed = mergeExternalHistory([user], [user, activity, final])
+  assert.deepEqual(delayed.map((item) => item.info.id), ["persisted-user", "live-activity", "live-final"])
+
+  const durableFinal = message("durable-final", "complete answer", 3_000, { phase: "final_answer" })
+  durableFinal.info.role = "assistant"
+  const caughtUp = mergeExternalHistory([user, durableFinal], delayed)
+  assert.deepEqual(caughtUp.map((item) => item.info.id), ["persisted-user", "live-activity", "durable-final"])
+})
+
 test("differential test: mergeReplay matches full-matrix LCS on random sequences", () => {
   function referenceMergeReplay(previous, replayed) {
     if (previous.length === 0) return replayed

@@ -2341,3 +2341,26 @@ test("Codex streaming preserves commentary/final boundaries even before the prom
     ])
   } finally { acp.finish?.({stopReason:"end_turn"}) }
 })
+
+test("Codex streaming normalizes the legacy final phase", async () => {
+  class PhaseAcp extends EventEmitter {
+    async start() {}
+    async listSessions() { return [{sessionId:"legacy-phase-session",cwd:"/repo"}] }
+    async request(method) {
+      if (method === "session/prompt") return new Promise(resolve => { this.finish = resolve })
+      return {}
+    }
+  }
+  const acp = new PhaseAcp()
+  const service = new AcpService(acp)
+  await service.claimSession("legacy-phase-session")
+  await service.prompt("legacy-phase-session", "test")
+  acp.emit("notification", {method:"session/update",params:{sessionId:"legacy-phase-session",update:{
+    sessionUpdate:"agent_message_chunk",messageId:"answer",content:{type:"text",text:"Done."},_meta:{codex:{phase:"final"}}
+  }}})
+  try {
+    const page = await service.messagePage("legacy-phase-session")
+    const text = page.messages.find(message => message.info.role === "assistant")?.parts[0]
+    assert.equal(text?.phase, "final_answer")
+  } finally { acp.finish?.({stopReason:"end_turn"}) }
+})

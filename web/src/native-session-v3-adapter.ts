@@ -441,9 +441,10 @@ function notify(entry: NativeConversationEntry): ConversationRuntime {
 }
 
 function captureUserTurns(entry: NativeConversationEntry, page: MessagePage, before?: string): void {
-  // The first page describes the Session state that existed when the v3 controller mounted. Older
-  // pages are admitted when the user explicitly pages backward. Tail refreshes do not manufacture
-  // new turns from replay IDs: new HR prompts already have one accepted client operation identity.
+  // Codex Sessions can be written from the PC while this read-only mobile projection stays mounted.
+  // Every newest Codex page may therefore introduce a real user turn. Native message ids make that
+  // discovery idempotent; other adapters retain the conservative initial/older-page behavior because
+  // some of them mint fresh replay ids for the same logical turn.
   let changed = false
   const claimedNativeIDs = new Set([...entry.turns.values()].flatMap((turn) => turn.nativeMessageID ? [turn.nativeMessageID] : []))
   const unbound = [...entry.turns.values()]
@@ -470,7 +471,7 @@ function captureUserTurns(entry: NativeConversationEntry, page: MessagePage, bef
     changed = true
   }
 
-  const mayDiscoverRuns = !entry.initialPageCaptured || Boolean(before)
+  const mayDiscoverRuns = entry.target.backend === "codex" || !entry.initialPageCaptured || Boolean(before)
   if (!mayDiscoverRuns) {
     if (changed) notify(entry)
     return

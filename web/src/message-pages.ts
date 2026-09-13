@@ -30,6 +30,36 @@ function regressesAssistantText(current: MessageEnvelope, incoming: MessageEnvel
   return currentText.length > incomingText.length && currentText.startsWith(incomingText)
 }
 
+function mergeEnvelopeMonotonically(current: MessageEnvelope, incoming: MessageEnvelope): MessageEnvelope {
+  if (sameEnvelope(current, incoming) || regressesAssistantText(current, incoming)) return current
+  const incomingByID = new Map(incoming.parts.map((part) => [part.id, part]))
+  const currentIDs = new Set(current.parts.map((part) => part.id))
+  let partsChanged = false
+  const parts = current.parts.map((part) => {
+    const next = incomingByID.get(part.id)
+    if (!next || JSON.stringify(next) === JSON.stringify(part)) return part
+    if (
+      part.type === "text" && next.type === "text"
+      && typeof part.text === "string" && typeof next.text === "string"
+      && part.text.length > next.text.length && part.text.startsWith(next.text)
+    ) return part
+    partsChanged = true
+    return next
+  })
+  for (const part of incoming.parts) {
+    if (currentIDs.has(part.id)) continue
+    parts.push(part)
+    partsChanged = true
+  }
+  const infoChanged = JSON.stringify(current.info) !== JSON.stringify(incoming.info)
+  if (!partsChanged && !infoChanged) return current
+  if (
+    parts.length === incoming.parts.length
+    && parts.every((part, index) => part === incoming.parts[index])
+  ) return incoming
+  return { ...incoming, info: infoChanged ? incoming.info : current.info, parts }
+}
+
 /**
  * Refresh the newest page without discarding older pages the user explicitly loaded.
  * Reuse both message objects and the array itself when the server did not change anything.
@@ -42,9 +72,11 @@ export function mergeLatestMessagePage(existing: MessageEnvelope[], latest: Mess
 
   const merged = existing.map((message) => {
     const incoming = latestByID.get(message.info.id)
-    if (!incoming || sameEnvelope(message, incoming) || regressesAssistantText(message, incoming)) return message
+    if (!incoming) return message
+    const next = mergeEnvelopeMonotonically(message, incoming)
+    if (next === message) return message
     changed = true
-    return incoming
+    return next
   })
   for (const message of latest) {
     if (existingIDs.has(message.info.id)) continue

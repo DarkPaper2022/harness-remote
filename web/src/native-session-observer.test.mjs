@@ -24,8 +24,8 @@ assert.equal(observer.includes('ModelSelectionControl'), false, 'observer must n
 
 assert.ok(adapter.includes('async loadMessagePage(config, sessionID, directory, before, limit, refreshHistory)'), 'adapter must observe the pages requested by the v3 controller through its scoped boundary')
 assert.equal(adapter.includes('api.loadMessagePage ='), false, 'native Session mounting must not mutate the shared API client')
-assert.ok(adapter.includes('!entry.initialPageCaptured || Boolean(before)'), 'initial history and explicit older paging may create compatibility Run identities')
-assert.ok(adapter.includes('if (!mayDiscoverRuns) return'), 'tail replay must not manufacture duplicate Runs from changed replay ids')
+assert.ok(adapter.includes('entry.target.backend === "codex" || !entry.initialPageCaptured || Boolean(before)'), 'Codex tail refreshes must discover user turns created remotely on the PC')
+assert.ok(adapter.includes('claimedNativeIDs.has(message.info.id)'), 'tail discovery must deduplicate stable native user message ids')
 assert.ok(adapter.includes(':request:${clientRequestId}'), 'new native prompts must use durable client request identity for the compatibility Run')
 assert.ok(adapter.includes('probeNativeSessionContinuation(entry.target)'), 'ACP writer acquisition must be deferred to the mutation boundary')
 assert.ok(adapter.includes('await ensureWriter(entry)'), 'Send and Stop must acquire writer ownership transparently when needed')
