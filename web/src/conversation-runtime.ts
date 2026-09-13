@@ -8,6 +8,8 @@ export type ConversationTurn = {
   model?: ModelSelection | null
   role?: string
   clientRequestId?: string
+  /** Stable identity of the native user envelope that owns this logical turn. */
+  nativeMessageID?: string
   sessionId?: string | null
   sessionID?: string | null
   status?: string

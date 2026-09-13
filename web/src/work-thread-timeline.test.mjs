@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { buildWorkThreadTimeline } from "./work-thread-timeline.ts"
+import { buildConversationTimeline, buildWorkThreadTimeline } from "./work-thread-timeline.ts"
 
 function message(sessionID, id, role, created, text) {
   return {
@@ -96,6 +96,39 @@ test("same native Session reused for many Runs follows native user-turn boundari
   ]
   const timeline = buildWorkThreadTimeline(value, { "same-session": native }, agents)
   assert.deepEqual(timeline.map(textOf), ["Initial request", "First answer", "Please refine that", "Second answer"])
+})
+
+test("native user identities keep recent replies attached when prompt matching would reorder them", () => {
+  const first = run({ id: "stable-1", sequence: 1, sessionId: "same-session", prompt: "Continue", nativeMessageID: "u-new" })
+  const second = run({
+    id: "stable-2",
+    sequence: 2,
+    sessionId: "same-session",
+    prompt: "Continue",
+    nativeMessageID: "u-old",
+    startedAt: "2026-08-21T10:02:00.000Z",
+    finishedAt: "2026-08-21T10:03:00.000Z"
+  })
+  const conversation = {
+    id: "native-session",
+    machineId: "machine-1",
+    agentId: "codex",
+    initialPrompt: "Continue",
+    status: "completed",
+    directory: "/repo",
+    currentTurn: second,
+    turns: [first, second],
+    createdAt: first.startedAt,
+    updatedAt: second.finishedAt
+  }
+  const native = [
+    message("same-session", "u-old", "user", 1, "Continue"),
+    message("same-session", "a-old", "assistant", 2, "Older reply"),
+    message("same-session", "u-new", "user", 3, "Continue"),
+    message("same-session", "a-new", "assistant", 4, "Newer reply")
+  ]
+  const timeline = buildConversationTimeline(conversation, { "same-session": native }, agents)
+  assert.deepEqual(timeline.filter((entry) => entry.info.role === "assistant").map(textOf), ["Newer reply", "Older reply"])
 })
 
 test("replayed timestamps do not affect Run ownership", () => {

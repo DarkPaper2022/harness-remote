@@ -179,11 +179,21 @@ function nativeTurns(messages: MessageEnvelope[]): NativeTurn[] {
   return turns
 }
 
-function turnsForRunPrompts(messages: MessageEnvelope[], prompts: string[]): Array<NativeTurn | null> {
+function turnsForConversationTurns(
+  messages: MessageEnvelope[],
+  logicalTurns: ConversationTurn[],
+  prompts: string[]
+): Array<NativeTurn | null> {
   const turns = nativeTurns(messages)
+  const byNativeUserID = new Map(turns.flatMap((turn) => turn.user?.info.id ? [[turn.user.info.id, turn] as const] : []))
+  const matched: Array<NativeTurn | null> = logicalTurns.map((turn) =>
+    turn.nativeMessageID ? byNativeUserID.get(turn.nativeMessageID) ?? null : null
+  )
+  const used = new Set(matched.filter((turn): turn is NativeTurn => Boolean(turn)))
   const matchesByPrompt = new Map<string, NativeTurn[]>()
 
   for (const turn of turns) {
+    if (used.has(turn)) continue
     if (!turn.user) continue
     const visible = userInstructionFromNative(textParts(turn.user.parts))
     if (!visible) continue
@@ -193,13 +203,16 @@ function turnsForRunPrompts(messages: MessageEnvelope[], prompts: string[]): Arr
   }
 
   const usedByPrompt = new Map<string, number>()
-  return prompts.map((prompt) => {
+  return prompts.map((prompt, index) => {
+    if (matched[index]) return matched[index]
     const key = canonicalText(prompt)
     if (!key) return null
     const candidates = matchesByPrompt.get(key) ?? []
     const ordinal = usedByPrompt.get(key) ?? 0
     usedByPrompt.set(key, ordinal + 1)
-    return candidates[ordinal] ?? null
+    const candidate = candidates[ordinal] ?? null
+    if (candidate) used.add(candidate)
+    return candidate
   })
 }
 
@@ -358,7 +371,8 @@ export function buildConversationTimeline(
   const nativeTurnByIndex = new Map<number, NativeTurn | null>()
   for (const [session, indexes] of turnIndexesBySession) {
     const prompts = indexes.map((index) => (turns[index].prompt || (index === 0 ? conversation.initialPrompt : "")).trim())
-    const matched = turnsForRunPrompts(messagesBySession[session] ?? [], prompts)
+    const logicalTurns = indexes.map((index) => turns[index])
+    const matched = turnsForConversationTurns(messagesBySession[session] ?? [], logicalTurns, prompts)
     indexes.forEach((turnIndex, ordinal) => nativeTurnByIndex.set(turnIndex, matched[ordinal] ?? null))
   }
 

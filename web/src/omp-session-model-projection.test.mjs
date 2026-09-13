@@ -80,6 +80,11 @@ test('an OMP transcript page carries the Session model into the open runtime', a
       [MODEL, MODEL],
       'the turns recovered from the transcript adopt it too'
     )
+    assert.deepEqual(
+      latest.turns.map((turn) => turn.nativeMessageID),
+      ['u1', 'u2'],
+      'recovered turns retain their native user identities for stable reply ownership'
+    )
   } finally {
     registration.dispose()
   }

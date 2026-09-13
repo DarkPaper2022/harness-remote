@@ -405,6 +405,7 @@ function sortedTurns(entry: NativeConversationEntry): ConversationTurn[] {
     transport: entry.target.transport,
     directory: entry.target.directory,
     prompt: turn.prompt,
+    ...(turn.nativeMessageID ? { nativeMessageID: turn.nativeMessageID } : {}),
     startedAt: iso(turn.created),
     ...(index === ordered.length - 1 && status === "running" ? {} : { finishedAt: iso(Math.max(turn.created, entry.updatedAt)) })
   }))
@@ -443,10 +444,38 @@ function captureUserTurns(entry: NativeConversationEntry, page: MessagePage, bef
   // The first page describes the Session state that existed when the v3 controller mounted. Older
   // pages are admitted when the user explicitly pages backward. Tail refreshes do not manufacture
   // new turns from replay IDs: new HR prompts already have one accepted client operation identity.
-  const mayDiscoverRuns = !entry.initialPageCaptured || Boolean(before)
-  if (!mayDiscoverRuns) return
-
   let changed = false
+  const claimedNativeIDs = new Set([...entry.turns.values()].flatMap((turn) => turn.nativeMessageID ? [turn.nativeMessageID] : []))
+  const unbound = [...entry.turns.values()]
+    .filter((turn) => !turn.nativeMessageID)
+    .sort((left, right) => left.created - right.created)
+
+  // A successfully accepted mobile prompt starts as a logical turn before Codex has necessarily
+  // journalled its user envelope. Bind it on the first tail read that sees the native identity.
+  // Without this binding every render re-matched all recent turns by prompt text; adding one prompt
+  // could consequently detach several replies when text repeated or journal entries arrived late.
+  for (const message of page.messages) {
+    if (message.info.role !== "user" || !message.info.id || claimedNativeIDs.has(message.info.id)) continue
+    const prompt = visiblePrompt(message)
+    if (!prompt) continue
+    const nativeCreated = Number(message.info.time?.created) || 0
+    const candidate = unbound.find((turn) =>
+      !turn.nativeMessageID
+      && turn.prompt === prompt
+      && (!nativeCreated || Math.abs(nativeCreated - turn.created) <= PENDING_TRANSCRIPT_CLOCK_SKEW_MS)
+    )
+    if (!candidate) continue
+    candidate.nativeMessageID = message.info.id
+    claimedNativeIDs.add(message.info.id)
+    changed = true
+  }
+
+  const mayDiscoverRuns = !entry.initialPageCaptured || Boolean(before)
+  if (!mayDiscoverRuns) {
+    if (changed) notify(entry)
+    return
+  }
+
   for (const message of page.messages) {
     if (message.info.role !== "user" || !message.info.id) continue
     const prompt = visiblePrompt(message)
