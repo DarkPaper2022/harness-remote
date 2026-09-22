@@ -1,0 +1,87 @@
+name: Build iOS IPA
+
+"on":
+  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+      - darkpaper
+    tags:
+      - "v*"
+    paths:
+      - 'web/**'
+      - '.github/workflows/ios-ipa.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install web dependencies
+        run: npm ci
+        working-directory: web
+
+      - name: Build web app
+        run: npm run build
+        working-directory: web
+
+      - name: Sync Capacitor iOS project
+        run: npm run cap:sync:ios
+        working-directory: web
+
+      - name: Read app version
+        id: version
+        run: |
+          APP_VERSION=$(node -p "require('./web/package.json').version")
+          echo "app_version=$APP_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build unsigned iOS archive and IPA
+        id: ipa
+        run: |
+          cd web/ios/App
+          xcodebuild archive \
+            -project App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/App.xcarchive \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+          mkdir -p build/Payload
+          cp -r build/App.xcarchive/Products/Applications/App.app build/Payload/
+          cd build
+          IPA_NAME="Harness-Remote-${{ steps.version.outputs.app_version }}-ios-unsigned.ipa"
+          zip -qr "$IPA_NAME" Payload
+          echo "path=web/ios/App/build/$IPA_NAME" >> "$GITHUB_OUTPUT"
+          echo "name=$IPA_NAME" >> "$GITHUB_OUTPUT"
+        working-directory: .
+
+      - name: Upload unsigned IPA artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: harness-remote-ios-unsigned-ipa-v${{ steps.version.outputs.app_version }}
+          path: ${{ steps.ipa.outputs.path }}
+
+      - name: Attach IPA to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: ${{ steps.ipa.outputs.path }}
