@@ -96,9 +96,17 @@ function writeSSE(response, event, data) {
   response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
 }
 
-async function allowedDirectory(candidate, config) {
+/**
+ * The daemon no longer depends on a configured `--root` to know where work happens. Project roots
+ * are learned from the working directories of the Sessions the harnesses already reported, so the
+ * boundary check has to accept those dynamic roots alongside any explicitly configured ones.
+ */
+async function allowedDirectory(candidate, config, extraRoots) {
   const resolved = await realpath(candidate)
-  const roots = await Promise.all((config.roots.length ? config.roots : [process.cwd()]).map((root) => realpath(root)))
+  const configured = config.roots.length ? config.roots : [process.cwd()]
+  const learned = typeof extraRoots === "function" ? await extraRoots() : extraRoots
+  const candidates = [...configured, ...(Array.isArray(learned) ? learned : [])]
+  const roots = (await Promise.all(candidates.map((root) => realpath(root).catch(() => undefined)))).filter(Boolean)
   if (!roots.some((root) => resolved === root || !path.relative(root, resolved).startsWith(`..${path.sep}`) && path.relative(root, resolved) !== "..")) {
     throw new Error("Directory is outside the configured --root boundary")
   }
@@ -109,6 +117,23 @@ function modelWireName(model) {
   if (!model) return undefined
   const modelID = model.modelID ?? model.id
   return model.providerID && modelID ? `${model.providerID}/${modelID}` : undefined
+}
+
+/**
+ * The default recent-activity window is an operator setting; a single request may still ask for the
+ * whole history (`?all=1`) or a different window (`?days=30`, `?days=0` for everything). Rejecting a
+ * malformed value keeps a typo from silently widening the result to the entire journal.
+ */
+function requestedWindowMs(url, defaultWindowMs) {
+  const days = url.searchParams.get("days")
+  if (days !== null && days.trim() !== "") {
+    const parsed = Number(days)
+    if (!Number.isFinite(parsed) || parsed < 0) throw new Error("Session days must be a non-negative number")
+    return parsed > 0 ? parsed * 24 * 60 * 60 * 1000 : 0
+  }
+  const all = (url.searchParams.get("all") ?? "").toLowerCase()
+  if (all === "1" || all === "true" || all === "yes") return 0
+  return defaultWindowMs
 }
 
 function sameListedDirectory(left, right) {
@@ -176,9 +201,16 @@ function providersResponse(models, fallbackProviderID) {
   return { providers: [...providers.values()], default: defaults }
 }
 
-export function createBridgeServer({ config, acp, serviceOptions, machineRegistry }) {
+export function createBridgeServer({ config, acp, serviceOptions, machineRegistry, dynamicRoots }) {
   const backend = config.backend ?? "omp"
   const profile = harnessProfile(backend)
+  const historyLoader = serviceOptions?.historyLoader
+  // A default recent-activity window keeps a years-old journal from being replayed into the app on
+  // every launch. `0` disables it entirely, which is what the direct `createBridgeServer` tests and
+  // an operator who wants the whole history both need. A per-request `?days=`/`?all=` overrides it.
+  const sessionWindowDays = Number(config.sessionDays)
+  const defaultWindowMs = Number.isFinite(sessionWindowDays) && sessionWindowDays > 0 ? sessionWindowDays * 24 * 60 * 60 * 1000 : 0
+  const cacheTtlMs = Number.isFinite(Number(config.sessionCacheTtlMs)) ? Math.max(0, Number(config.sessionCacheTtlMs)) : 3_000
   const serviceAcp = new AcpPromptEchoFilter(acp)
   const service = new AcpService(serviceAcp, {
     ...serviceOptions,
@@ -223,6 +255,51 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
     if (!hiddenSessionIDs?.size) return sessions
     return sessions.filter((session) => !hiddenSessionIDs.has(session.id))
   }
+  // One in-flight native listing is shared by every caller asking for the same page. A short TTL on
+  // the resolved page additionally absorbs the burst of listing/status requests a client makes while
+  // the startup screen is still settling. The cache stores the raw harness page so late filtering
+  // (window, hidden, deleted, ownership) still happens per request and cannot go stale.
+  const nativePageCache = new Map()
+  const loadNativePage = (cursor, sinceMs) => {
+    const key = `${cursor ?? ""}\u0000${sinceMs ?? ""}`
+    const entry = nativePageCache.get(key)
+    const now = Date.now()
+    if (entry?.value && now - entry.at < cacheTtlMs) return Promise.resolve(entry.value)
+    if (entry?.promise) return entry.promise
+    const promise = (async () => {
+      // The Codex state database can answer the listing without paying for `thread/list`, which
+      // materialises every preview. `undefined` means the fast path is unavailable, not empty.
+      const fast = typeof historyLoader?.listSessions === "function"
+        ? await historyLoader.listSessions({ cursor, sinceMs: sinceMs || undefined })
+        : undefined
+      const page = fast ?? (typeof acp.listSessionPage === "function"
+        ? await acp.listSessionPage(cursor)
+        : cursor
+          ? { sessions: [] }
+          : await acp.listSessions().then((sessions) => ({ sessions })))
+      serviceOptions?.onSessionDirectories?.(page.sessions.map((session) => session.cwd).filter((cwd) => typeof cwd === "string" && cwd))
+      nativePageCache.set(key, { value: page, at: Date.now() })
+      return page
+    })()
+    nativePageCache.set(key, { promise })
+    promise.catch(() => {
+      if (nativePageCache.get(key)?.promise === promise) nativePageCache.delete(key)
+    })
+    return promise
+  }
+
+  // PI's ACP adapter leaves `updatedAt` undefined, so the file modification time is the only signal
+  // that a Session was used recently. Recover it before the window filter runs, otherwise a Session
+  // the user just finished would be hidden as "inactive".
+  const recoverMissingUpdatedAt = async (sessions) => {
+    if (typeof historyLoader?.sessionUpdatedAt !== "function") return
+    await Promise.all(sessions.map(async (session) => {
+      if (Number.isFinite(Date.parse(session.updatedAt ?? ""))) return
+      const recovered = await historyLoader.sessionUpdatedAt(session.sessionId).catch(() => undefined)
+      if (recovered) session.updatedAt = recovered
+    }))
+  }
+
   // TaskDesk only needs index metadata to render the Sessions list and status counts. Calling
   // AcpService.listSessions here used to restore every persisted transcript snapshot into memory,
   // so merely opening the app could retain gigabytes of historical messages. The experimental
@@ -230,15 +307,13 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
   // Live activity is tracked separately so an active Session still sorts to the top without reading
   // its transcript. Invalid or missing harness timestamps stay at zero instead of pretending to be
   // freshly updated on every poll.
-  const listVisibleSessionMetadata = async (directory, cursor) => {
+  const listVisibleSessionMetadata = async (directory, cursor, windowMs = defaultWindowMs) => {
+    const cutoff = Number.isFinite(windowMs) && windowMs > 0 ? Date.now() - windowMs : 0
     const [page, deletedSessionIDs] = await Promise.all([
-      typeof acp.listSessionPage === "function"
-        ? acp.listSessionPage(cursor)
-        : cursor
-          ? { sessions: [] }
-          : acp.listSessions().then((sessions) => ({ sessions })),
+      loadNativePage(cursor, cutoff),
       service.deletedSessionIDs()
     ])
+    await recoverMissingUpdatedAt(page.sessions)
     service.rememberListedSessions(page.sessions)
     const visible = new Map(
       page.sessions
@@ -274,8 +349,12 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
         })
       }
     }
+    const sessions = [...visible.values()]
     return {
-      sessions: [...visible.values()],
+      // The window is applied to the rendered view so a Session that only looks active because of
+      // bridge-tracked live activity is kept even when the harness timestamp is older than the
+      // window. The harness-side fast path already narrowed its own query for the common case.
+      sessions: cutoff ? sessions.filter((session) => (session.time?.updated ?? 0) >= cutoff) : sessions,
       ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
     }
   }
@@ -295,6 +374,9 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
 
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`)
     const directory = url.searchParams.get("directory") || undefined
+    // A create/rename/delete/prompt must be visible on the very next read, so any cached native page
+    // is dropped before the mutation runs. Reads keep the short TTL that absorbs startup bursts.
+    if (request.method !== "GET") nativePageCache.clear()
     if (config.logRequests && url.pathname === "/config/providers") process.stderr.write(`[bridge] ${request.method} ${url.pathname}${url.search}\n`)
     try {
       if (request.method === "GET" && (url.pathname === "/v1/machine" || url.pathname === "/global/machine")) {
@@ -363,7 +445,7 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
         return
       }
       if (request.method === "GET" && url.pathname === "/experimental/session") {
-        const page = await listVisibleSessionMetadata(directory, url.searchParams.get("cursor") || undefined)
+        const page = await listVisibleSessionMetadata(directory, url.searchParams.get("cursor") || undefined, requestedWindowMs(url, defaultWindowMs))
         if (page.nextCursor) response.setHeader("x-next-cursor", page.nextCursor)
         writeJSON(response, 200, page.sessions)
         return
@@ -373,18 +455,18 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
         return
       }
       if (request.method === "GET" && url.pathname === "/session/status") {
-        const page = await listVisibleSessionMetadata(directory)
+        const page = await listVisibleSessionMetadata(directory, undefined, requestedWindowMs(url, defaultWindowMs))
         const statuses = Object.fromEntries(page.sessions.map((session) => [session.id, session.status]))
         writeJSON(response, 200, statuses)
         return
       }
       if (request.method === "GET" && url.pathname === "/path") {
-        const selected = await allowedDirectory(directory ?? config.roots[0] ?? process.cwd(), config)
+        const selected = await allowedDirectory(directory ?? config.roots[0] ?? process.cwd(), config, dynamicRoots)
         writeJSON(response, 200, { home: selected, state: "", config: "", worktree: selected, directory: selected })
         return
       }
       if (request.method === "GET" && url.pathname === "/file") {
-        const selected = await allowedDirectory(url.searchParams.get("path") ?? config.roots[0] ?? process.cwd(), config)
+        const selected = await allowedDirectory(url.searchParams.get("path") ?? config.roots[0] ?? process.cwd(), config, dynamicRoots)
         const entries = await readdir(selected, { withFileTypes: true })
         writeJSON(response, 200, entries.map((entry) => ({
           name: entry.name,
@@ -397,7 +479,7 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
       }
       if (request.method === "POST" && url.pathname === "/session") {
         const body = await readBody(request)
-        const selected = await allowedDirectory(directory ?? config.roots[0] ?? process.cwd(), config)
+        const selected = await allowedDirectory(directory ?? config.roots[0] ?? process.cwd(), config, dynamicRoots)
         const created = await service.createSession({ directory: selected, title: body.title, model: modelWireName(body.model) })
         writeJSON(response, 200, created)
         return

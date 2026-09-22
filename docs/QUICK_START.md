@@ -28,8 +28,8 @@ npx github:giuliastro/harness-remote \
   --cors http://localhost:5173
 ```
 
-`--root` is the directory boundary used when choosing Projects. The launcher prints the machine
-address and credentials you will enter in the client.
+`--root` is an optional extra directory boundary used when choosing Projects. The launcher prints the machine
+address and credentials you will enter in the client. The daemon already derives Projects, and the boundary used for browsing and new Sessions, from the working directories of the Sessions each harness reports, so it is normally unnecessary. Only Sessions active within the last 7 days are listed; change that with `--session-days <n>` (`0` for everything).
 
 To use the web/PWA frontend from a checkout:
 

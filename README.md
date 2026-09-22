@@ -180,7 +180,7 @@ Harness Remote exposes a control surface over that environment.
 
 For remote access, use a trusted LAN or VPN. Do not expose the daemon directly to the public internet.
 
-> `--root` limits which directories Harness Remote exposes for Project selection. It is **not** an operating-system sandbox for the coding agent itself; native harnesses still run with the privileges of the account that launched them.
+> `--root` limits which directories Harness Remote exposes for Project selection. It is **not** an operating-system sandbox for the coding agent itself; native harnesses still run with the privileges of the account that launched them. The daemon also learns Project roots from the working directory of every Session its harnesses report, so a machine with existing Sessions does not need `--root` at all. Point `--root` at a container such as `~/Documents` only if you want that container to be a Project itself; otherwise every Project below it is merged into one group.
 
 See [REFERENCE.md](REFERENCE.md) for detailed security and backend notes.
 
@@ -206,7 +206,9 @@ npx github:giuliastro/harness-remote \
   --root "$HOME/Software"
 ```
 
-`--root` defines the directory boundary Harness Remote may browse when you select Projects.
+`--root` defines an extra directory boundary Harness Remote may browse when you select Projects. It is optional: the daemon already derives Projects and the directory boundary from the working directories of the Sessions it discovers.
+
+By default only Sessions active within the last 7 days are listed. Use `--session-days <n>` (or `HARNESS_REMOTE_SESSION_DAYS`) to change that window, or `0` to list the whole history. A single request can override it with `?days=<n>` or `?all=1`.
 
 The launcher detects supported CLIs on `PATH`, starts the compatible local runtime and prints the connection details.
 

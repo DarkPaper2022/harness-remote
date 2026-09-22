@@ -206,3 +206,60 @@ test("reports no history rather than failing when a rollout is absent", async ()
     await rm(root, { recursive: true, force: true })
   }
 })
+
+test("lists Codex threads from the state database instead of paying for app-server thread/list", async (t) => {
+  let DatabaseSync
+  try {
+    ({ DatabaseSync } = await import("node:sqlite"))
+  } catch {
+    t.skip("node:sqlite is unavailable on this runtime")
+    return
+  }
+  const codexHome = await mkdtemp(path.join(tmpdir(), "harness-remote-codex-state-"))
+  const sessions = path.join(codexHome, "sessions")
+  await mkdir(sessions, { recursive: true })
+  const now = Date.parse("2026-09-22T12:00:00.000Z")
+  const database = new DatabaseSync(path.join(codexHome, "state_5.sqlite"))
+  database.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT, name TEXT, preview TEXT, created_at_ms INTEGER, updated_at_ms INTEGER, archived INTEGER, source TEXT, model_provider TEXT)")
+  const insert = database.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+  insert.run("recent", "/work/a", "Recent name", "recent preview", now, now, 0, "cli", "openai")
+  insert.run("preview-only", "/work/b", "", "preview title", now - 1_000, now - 500, 0, "vscode", "openai")
+  insert.run("archived", "/work/c", "Archived", "", now - 2_000, now - 2_000, 1, "cli", "openai")
+  insert.run("subagent", "/work/d", "Sub", "", now - 3_000, now - 3_000, 0, '{"subagent":"x"}', "openai")
+  insert.run("old", "/work/e", "Old", "", now - 40 * 86_400_000, now - 40 * 86_400_000, 0, "cli", "openai")
+  database.close()
+
+  try {
+    const loader = createCodexHistoryLoader(sessions)
+    const page = await loader.listSessions({})
+    assert.deepEqual(page.sessions.map((session) => session.sessionId), ["recent", "preview-only", "old"], "archived and subagent threads stay out of the user's list")
+    assert.deepEqual(page.sessions.map((session) => session.title), ["Recent name", "preview title", "Old"])
+    assert.equal(page.sessions[0].updatedAt, new Date(now).toISOString())
+
+    const windowed = await loader.listSessions({ sinceMs: now - 7 * 86_400_000 })
+    assert.deepEqual(windowed.sessions.map((session) => session.sessionId), ["recent", "preview-only"])
+
+    const firstPage = await loader.listSessions({ limit: 2 })
+    assert.deepEqual(firstPage.sessions.map((session) => session.sessionId), ["recent", "preview-only"])
+    assert.ok(firstPage.nextCursor, "a full page must hand back an opaque cursor")
+    const secondPage = await loader.listSessions({ limit: 2, cursor: firstPage.nextCursor })
+    assert.deepEqual(secondPage.sessions.map((session) => session.sessionId), ["old"])
+    assert.equal(secondPage.nextCursor, undefined)
+
+    assert.equal(await loader.listSessions({ cursor: "not-ours" }), undefined, "an unknown cursor must fall back to ACP rather than silently restart the list")
+    assert.deepEqual((await loader.listSessionDirectories()).sort(), ["/work/a", "/work/b", "/work/d", "/work/e"])
+  } finally {
+    await rm(codexHome, { recursive: true, force: true })
+  }
+})
+
+test("falls back to the ACP listing when the Codex state database is absent or unusable", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "harness-remote-codex-nostate-"))
+  try {
+    const loader = createCodexHistoryLoader(root)
+    assert.equal(await loader.listSessions({}), undefined)
+    assert.deepEqual(await loader.listSessionDirectories(), [])
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})

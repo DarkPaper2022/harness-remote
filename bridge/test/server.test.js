@@ -362,9 +362,11 @@ class ExtensionActionAcp extends EventEmitter {
   notify() {}
 }
 
-async function startServer({ acp = new FakeAcp(), ...options } = {}) {
+async function startServer({ acp = new FakeAcp(), dynamicRoots, serviceOptions, ...options } = {}) {
   const server = createBridgeServer({
     acp,
+    dynamicRoots,
+    serviceOptions,
     config: {
       host: "127.0.0.1",
       port: 0,
@@ -2218,7 +2220,9 @@ test("lightweight Session index exposes one ACP page and forwards its opaque cur
 
     const statuses = await readJSON(bridge.baseURL, "/session/status")
     assert.deepEqual(Object.keys(statuses), ["recent"], "status polling must remain bounded to the first page")
-    assert.deepEqual(acp.cursors, [undefined, "opaque+/cursor==", undefined])
+    // The status route asks for page one again, and the in-flight/TTL cache answers it instead of
+    // paying for a second identical ACP listing.
+    assert.deepEqual(acp.cursors, [undefined, "opaque+/cursor=="])
   } finally {
     await bridge.close()
   }
@@ -2270,7 +2274,9 @@ test("lightweight Session index preserves non-paginated behavior across ACP back
 
       const statuses = await readJSON(bridge.baseURL, "/session/status")
       assert.deepEqual(Object.keys(statuses), [`${backend}-session`], `${backend} status discovery must keep using page one`)
-      assert.deepEqual(acp.cursors, [undefined, undefined], `${backend} must not invent or follow a cursor`)
+      // Both routes request the same cursor-less page, so the second request is served from the
+      // shared page cache rather than a second ACP round trip.
+      assert.deepEqual(acp.cursors, [undefined], `${backend} must not invent or follow a cursor`)
     } finally {
       await bridge.close()
     }
@@ -2363,4 +2369,195 @@ test("Codex streaming normalizes the legacy final phase", async () => {
     const text = page.messages.find(message => message.info.role === "assistant")?.parts[0]
     assert.equal(text?.phase, "final_answer")
   } finally { acp.finish?.({stopReason:"end_turn"}) }
+})
+
+test("the default recent-activity window hides dormant Sessions and a request can widen it", async () => {
+  const now = Date.now()
+  class DormantAcp extends EventEmitter {
+    agentInfo = { version: "1.0.0" }
+    async start() {}
+    async listSessionPage() {
+      return {
+        sessions: [
+          { sessionId: "fresh", title: "Fresh", cwd: process.cwd(), updatedAt: new Date(now - 1_000).toISOString() },
+          { sessionId: "stale", title: "Stale", cwd: process.cwd(), updatedAt: new Date(now - 40 * 86_400_000).toISOString() }
+        ]
+      }
+    }
+    async request() { return {} }
+    notify() {}
+  }
+
+  const bridge = await startServer({ acp: new DormantAcp(), sessionDays: 7 })
+  try {
+    assert.deepEqual((await readJSON(bridge.baseURL, "/experimental/session")).map((session) => session.id), ["fresh"])
+    assert.deepEqual((await readJSON(bridge.baseURL, "/experimental/session?all=1")).map((session) => session.id), ["fresh", "stale"])
+    assert.deepEqual((await readJSON(bridge.baseURL, "/experimental/session?days=90")).map((session) => session.id), ["fresh", "stale"])
+    assert.deepEqual((await readJSON(bridge.baseURL, "/experimental/session?days=0")).map((session) => session.id), ["fresh", "stale"])
+    assert.deepEqual(Object.keys(await readJSON(bridge.baseURL, "/session/status")), ["fresh"], "status must respect the same window")
+
+    const invalid = await fetch(`${bridge.baseURL}/experimental/session?days=soon`, { headers: authHeaders() })
+    assert.equal(invalid.status, 400, "a malformed window must not silently widen to the whole history")
+  } finally {
+    await bridge.close()
+  }
+})
+
+test("the recent-activity window keeps a Session whose harness omitted updatedAt when the journal knows it", async () => {
+  const now = Date.now()
+  class NoTimestampAcp extends EventEmitter {
+    agentInfo = { version: "1.0.0" }
+    async start() {}
+    async listSessionPage() {
+      return {
+        sessions: [
+          { sessionId: "pi-fresh", title: "Fresh PI", cwd: process.cwd() },
+          { sessionId: "pi-stale", title: "Stale PI", cwd: process.cwd() }
+        ]
+      }
+    }
+    async request() { return {} }
+    notify() {}
+  }
+
+  const recovered = {
+    "pi-fresh": new Date(now - 60_000).toISOString(),
+    "pi-stale": new Date(now - 40 * 86_400_000).toISOString()
+  }
+  const serviceOptions = { historyLoader: { sessionUpdatedAt: async (sessionID) => recovered[sessionID] } }
+  const bridge = await startServer({ acp: new NoTimestampAcp(), sessionDays: 7, serviceOptions })
+  try {
+    const sessions = await readJSON(bridge.baseURL, "/experimental/session")
+    assert.deepEqual(sessions.map((session) => session.id), ["pi-fresh"])
+    assert.equal(sessions[0].time.updated, Date.parse(recovered["pi-fresh"]))
+  } finally {
+    await bridge.close()
+  }
+})
+
+test("the Codex state database listing is preferred and its opaque cursor is forwarded", async () => {
+  class ExplodingAcp extends EventEmitter {
+    agentInfo = { version: "1.0.0" }
+    async start() {}
+    async listSessionPage() { throw new Error("the indexed listing must not fall back to app-server") }
+    async listSessions() { throw new Error("the indexed listing must not fall back to an eager listing") }
+    async request() { return {} }
+    notify() {}
+  }
+
+  const calls = []
+  const serviceOptions = {
+    historyLoader: {
+      listSessions: async ({ cursor, sinceMs }) => {
+        calls.push({ cursor, sinceMs })
+        return cursor
+          ? { sessions: [{ sessionId: "older", title: "Older", cwd: process.cwd(), updatedAt: new Date().toISOString() }] }
+          : { sessions: [{ sessionId: "fresh", title: "Fresh", cwd: process.cwd(), updatedAt: new Date().toISOString() }], nextCursor: "codex-created:42" }
+      }
+    }
+  }
+
+  const bridge = await startServer({ acp: new ExplodingAcp(), backend: "codex", sessionDays: 7, serviceOptions })
+  try {
+    const first = await fetch(`${bridge.baseURL}/experimental/session`, { headers: authHeaders() })
+    assert.equal(first.status, 200)
+    assert.equal(first.headers.get("x-next-cursor"), "codex-created:42")
+    assert.deepEqual((await first.json()).map((session) => session.id), ["fresh"])
+    assert.ok(calls[0].sinceMs > 0, "the window must be pushed into the indexed query instead of filtering after the fact")
+
+    const second = await fetch(`${bridge.baseURL}/experimental/session?cursor=${encodeURIComponent("codex-created:42")}`, { headers: authHeaders() })
+    assert.deepEqual((await second.json()).map((session) => session.id), ["older"])
+    assert.equal(calls[1].cursor, "codex-created:42")
+  } finally {
+    await bridge.close()
+  }
+})
+
+test("concurrent identical listings are coalesced into a single backend call", async () => {
+  let calls = 0
+  class SlowAcp extends EventEmitter {
+    agentInfo = { version: "1.0.0" }
+    async start() {}
+    async listSessionPage() {
+      calls += 1
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      return { sessions: [{ sessionId: "only", title: "Only", cwd: process.cwd(), updatedAt: new Date().toISOString() }] }
+    }
+    async request() { return {} }
+    notify() {}
+  }
+
+  const bridge = await startServer({ acp: new SlowAcp() })
+  try {
+    const [first, second] = await Promise.all([
+      readJSON(bridge.baseURL, "/experimental/session"),
+      readJSON(bridge.baseURL, "/experimental/session")
+    ])
+    assert.deepEqual(first.map((session) => session.id), ["only"])
+    assert.deepEqual(second.map((session) => session.id), ["only"])
+    assert.equal(calls, 1)
+  } finally {
+    await bridge.close()
+  }
+})
+
+test("a dynamically learned project directory satisfies the boundary check without a configured root", async () => {
+  const { mkdtemp, realpath, rm } = await import("node:fs/promises")
+  const { tmpdir } = await import("node:os")
+  const project = await realpath(await mkdtemp(path.join(tmpdir(), "harness-dynamic-root-")))
+  try {
+    const bridge = await startServer({ roots: [], dynamicRoots: async () => [project] })
+    try {
+      const allowed = await fetch(`${bridge.baseURL}/path?directory=${encodeURIComponent(project)}`, { headers: authHeaders() })
+      assert.equal(allowed.status, 200)
+      assert.equal((await allowed.json()).directory, project)
+    } finally {
+      await bridge.close()
+    }
+
+    const deniedBridge = await startServer({ roots: [] })
+    try {
+      const denied = await fetch(`${deniedBridge.baseURL}/path?directory=${encodeURIComponent(project)}`, { headers: authHeaders() })
+      assert.equal(denied.status, 400)
+    } finally {
+      await deniedBridge.close()
+    }
+  } finally {
+    await rm(project, { recursive: true, force: true })
+  }
+})
+
+test("a mutation invalidates the cached native page so the next read is fresh", async () => {
+  let calls = 0
+  class CountingAcp extends EventEmitter {
+    agentInfo = { version: "1.0.0" }
+    async start() {}
+    async listSessionPage() {
+      calls += 1
+      return { sessions: [{ sessionId: "only", title: "Only", cwd: process.cwd(), updatedAt: new Date().toISOString() }] }
+    }
+    async request(method) {
+      return method === "session/new" ? { sessionId: "created", configOptions: [] } : {}
+    }
+    notify() {}
+  }
+
+  const bridge = await startServer({ acp: new CountingAcp() })
+  try {
+    await readJSON(bridge.baseURL, "/experimental/session")
+    await readJSON(bridge.baseURL, "/experimental/session")
+    assert.equal(calls, 1, "the short TTL serves an identical back-to-back read")
+
+    const created = await fetch(`${bridge.baseURL}/session`, {
+      method: "POST",
+      headers: jsonHeaders(),
+      body: JSON.stringify({ directory: process.cwd() })
+    })
+    assert.equal(created.status, 200)
+
+    await readJSON(bridge.baseURL, "/experimental/session")
+    assert.equal(calls, 2, "a mutation must not leave a stale page behind")
+  } finally {
+    await bridge.close()
+  }
 })

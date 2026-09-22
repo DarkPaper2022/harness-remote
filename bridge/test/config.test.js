@@ -15,6 +15,7 @@ test("defaults to a loopback-only unauthenticated listener", () => {
     acpArgs: ["acp"],
     roots: [],
     corsOrigins: [],
+    sessionDays: 7,
     logRequests: false,
     stateDirectory: path.join(homedir(), ".harness-remote")
   })
@@ -86,6 +87,15 @@ test("prefers generic environment names while retaining OMP aliases", () => {
 test("allows session snapshot storage to be relocated", () => {
   assert.equal(parseConfig(["--state-dir", "/tmp/harness-state"], {}).stateDirectory, "/tmp/harness-state")
   assert.equal(parseConfig([], { HARNESS_REMOTE_STATE_DIR: "/tmp/env-state" }).stateDirectory, "/tmp/env-state")
+})
+
+test("defaults to a recent-activity window that a flag or environment variable can widen", () => {
+  assert.equal(parseConfig([], {}).sessionDays, 7)
+  assert.equal(parseConfig(["--session-days", "30"], {}).sessionDays, 30)
+  assert.equal(parseConfig(["--session-days", "0"], {}).sessionDays, 0)
+  assert.equal(parseConfig([], { HARNESS_REMOTE_SESSION_DAYS: "14" }).sessionDays, 14)
+  assert.throws(() => parseConfig(["--session-days", "-1"], {}), /non-negative/)
+  assert.throws(() => parseConfig(["--session-days", "soon"], {}), /non-negative/)
 })
 
 test("shares the bridge with browser origins only when asked", () => {

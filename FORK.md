@@ -12,6 +12,7 @@
 - 外部 Codex 会话的模型、命令和操作列表查询不再调用 session/load，避免手机查看活动会话时触发 active writer 错误。历史仍读取原生日志，主动接续仍需取得原生写锁。
 - 服务专用 Codex 包装器沿用 API key、禁止自动弹出 OAuth 浏览器，并使用主机 Codex CLI。
 - Android 下载构建强制使用本 fork 的固定 release keystore；私钥与口令只保存在 GitHub Actions Secrets 及本机私有备份，不进入 Git。由 `web/package.json` 推导 `versionCode`，每次 Android 发布都要递增版本。
+- 项目目录与会话列表按需发现：不再依赖 `HARNESS_REMOTE_ROOT` 指向的容器目录；daemon 从各 harness 已上报会话的工作目录动态生成项目与目录边界，并默认只列出最近 7 天有活动的会话。Codex 列表直接读取本地 `state_*.sqlite` 索引，启动列会话从约 6.8s 降到约 10ms。
 
 `origin` 指向本 fork，`upstream` 指向原仓库。`darkpaper` 是本 fork 的默认维护分支，`main` 保留上游版本。维护分支初始基线为 `78b0e1394883b0197b27354bddf003cf3f8deaf6`，不自动升级运行中的服务。日常开发推送 origin/darkpaper；同步前保持工作区干净，然后：
 
@@ -23,6 +24,18 @@ git push origin darkpaper
 ```
 
 同步时重点核对外部会话只读元数据标记、适配器 NO_BROWSER/CODEX_PATH 行为及固定版本兼容性。不要用强制推送覆盖已发布改动。本机部署配置与运维文档仅保存在本地，不进入 Git；运行中服务的重启应另行执行。
+
+## 项目发现、目录边界与最近会话窗口
+
+上游要求用 `--root` 指定项目目录边界，并把配置的根目录本身当作项目。当根目录是 `~/Documents` 这类容器时，前端会按路径前缀把所有子目录折叠成同一个 “Documents” 项目，无法区分真实仓库。
+
+本 fork 的 daemon 改为从各 harness 已上报会话的 `cwd` 学习项目根：先 `realpath`，再向上找到最近的 `.git` 目录作为仓库根，否则使用该目录本身；同时把这些目录并入 `/path`、`/file`、新建会话的目录边界。因此 `HARNESS_REMOTE_ROOT` 不再是必需的（配置后仍按上游语义作为“配置根”参与项目列表，但不要指向容器目录）。单一 harness 的 `bridge/src/cli.js` 也采用同样的学习逻辑。
+
+会话列表默认只包含最近 7 天内有活动的会话（按 harness 时间戳；PI 适配器缺失 `updatedAt` 时用日志文件 `mtime` 回填）。可用 `--session-days <n>` 或 `HARNESS_REMOTE_SESSION_DAYS` 调整，`0` 表示全部；单次请求可用 `?days=<n>` 或 `?all=1` 覆盖，非法取值返回 400。原生列表页按 `cursor + 时间窗口` 做单飞合并并缓存约 3 秒，写操作会立即失效缓存，因此删除、改名或新建会话在下次读取时即可见。
+
+Codex 的 `thread/list` 需要扫描约 500MB 的 `thread_history_1.sqlite`，是启动卡顿的主因。本 fork 在 `bridge/src/codex-session-history.js` 中通过受保护的动态 `import("node:sqlite")` 直接查询 `state_<n>.sqlite` 的 `threads` 表（要求 Node 22.5+），失败或遇到未知游标时自动回退到 ACP。分页游标格式为 `codex-created:<created_at_ms>`。
+
+相关回归测试在 `bridge/test/server.test.js`、`bridge/test/codex-session-history.test.js`、`bridge/test/pi-session-history.test.js`、`bridge/test/project-catalog.test.js`、`bridge/test/machine-daemon.test.js` 与 `bridge/test/config.test.js`。
 
 项目快捷创建的浏览器验收：在 web 中安装与上游 CI 相同的 Playwright 测试工具后，运行 `node scripts/project-session-create-smoke.mjs`。可通过 CHROMIUM_EXECUTABLE 指定已有 Chromium。脚本使用模拟机器，覆盖手机/桌面视口、项目预选、错误重试和离线保护；不会访问真实会话。
 

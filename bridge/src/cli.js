@@ -37,16 +37,36 @@ if (config) {
     machineRegistry,
     profile.id
   )
+  // The single-harness bridge learns its directory boundary the same way the daemon does: from the
+  // working directories of the Sessions the harness already reported, with no configured root needed.
+  const learnedDirectories = new Set()
+  const sessionDirectories = async () => {
+    const all = new Set(learnedDirectories)
+    if (typeof profile.historyLoader?.listSessionDirectories === "function") {
+      const days = Number(config.sessionDays)
+      const sinceMs = Number.isFinite(days) && days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : undefined
+      try {
+        for (const directory of await profile.historyLoader.listSessionDirectories({ sinceMs })) all.add(directory)
+      } catch {
+        // A harness that cannot enumerate its Sessions must not take the boundary check down.
+      }
+    }
+    return [...all]
+  }
   const server = createBridgeServer({
     config,
     acp,
     machineRegistry,
+    dynamicRoots: sessionDirectories,
     serviceOptions: {
       snapshotDirectory: path.join(config.stateDirectory, profile.id),
       historyLoader: profile.historyLoader,
       preserveListedTimestamps: profile.preserveListedTimestamps,
       reloadOnHistoryRefresh: profile.reloadOnHistoryRefresh,
-      replaySettleMs: profile.replaySettleMs
+      replaySettleMs: profile.replaySettleMs,
+      onSessionDirectories: (directories) => {
+        for (const directory of directories ?? []) learnedDirectories.add(directory)
+      }
     }
   })
   let shuttingDown = false

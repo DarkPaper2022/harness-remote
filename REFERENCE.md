@@ -264,7 +264,9 @@ Harness Remote connects to OMP through the bridge included in this repository. T
 - a working `omp` command in `PATH`;
 - a checkout of this repository on the computer that runs OMP.
 
-Start the bridge from the repository root. Restrict every worktree that the phone may access with `--root`; repeat the option to allow more than one root.
+Start the bridge from the repository root. `--root` adds a worktree the phone may access; repeat the option to allow more than one root. It is optional on the daemon, which also learns Project roots and the directory boundary from the working directories of the Sessions its harnesses report. Do not point it at a container such as `~/Documents`, or every Project below it is merged into a single group.
+
+Only Sessions active within the last 7 days are listed by default. `--session-days <n>` (or `HARNESS_REMOTE_SESSION_DAYS`) changes the window; `0` lists the whole history. A request may override it with `?days=<n>` or `?all=1`.
 
 ```bash
 npx --yes ./bridge \
@@ -346,7 +348,7 @@ Codex CLI — hide the paperclip, and the bridge refuses an attachment sent to t
 
 #### What `--root` does and does not restrict
 
-`--root` restricts the bridge's own surface: which directories the app may browse (`/file`, `/path`) and which working directory a new session may use. It is not a sandbox for the agent. Once a session is running, OMP executes with your full user privileges and approves its own tool calls, so it can read and write outside the configured roots exactly as it would on the desktop. Point the bridge only at machines and accounts where you would already let OMP work unattended.
+`--root` restricts the bridge's own surface: which directories the app may browse (`/file`, `/path`) and which working directory a new session may use. It is not a sandbox for the agent. Once a session is running, OMP executes with your full user privileges and approves its own tool calls, so it can read and write outside the configured roots exactly as it would on the desktop. Point the bridge only at machines and accounts where you would already let OMP work unattended. The daemon additionally authorizes every working directory of a Session it has discovered, so removing `--root` does not break browsing or new Sessions in the Projects you actually use.
 
 #### Browser access
 

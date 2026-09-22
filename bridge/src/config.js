@@ -36,6 +36,12 @@ function parseBackend(value) {
   return harnessProfile(value).id
 }
 
+function parseSessionDays(value) {
+  const days = Number(value)
+  if (!Number.isFinite(days) || days < 0) throw new Error("--session-days must be a non-negative number")
+  return days
+}
+
 
 function environmentValue(environment, name) {
   return environment[`HARNESS_REMOTE_${name}`] ?? environment[`OMP_BRIDGE_${name}`]
@@ -60,6 +66,7 @@ export function parseConfig(args, environment = process.env) {
     acpArgs: parseArgumentList(acpArgs, launch.args),
     roots: root ? [root] : [],
     corsOrigins: cors ? [cors] : [],
+    sessionDays: parseSessionDays(environmentValue(environment, "SESSION_DAYS") ?? "7"),
     logRequests: environmentValue(environment, "LOG_REQUESTS") === "1",
     stateDirectory: environmentValue(environment, "STATE_DIR") ?? path.join(homedir(), ".harness-remote")
   }
@@ -111,6 +118,10 @@ export function parseConfig(args, environment = process.env) {
         config.roots.push(requireValue(args, index, option))
         index += 1
         break
+      case "--session-days":
+        config.sessionDays = parseSessionDays(requireValue(args, index, option))
+        index += 1
+        break
       case "--cors":
         config.corsOrigins.push(requireValue(args, index, option))
         index += 1
@@ -140,5 +151,6 @@ export function parseConfig(args, environment = process.env) {
 }
 
 export function usage() {
-  return `Usage: harness-remote-bridge [options]\n\nOptions:\n  --backend <name>       ACP backend: omp or pi (default: omp)\n  --host <host>          Bind host (default: 127.0.0.1)\n  --port <port>          Bind port (default: 4097)\n  --username <username>  Enable HTTP Basic Auth\n  --password <password>  Enable HTTP Basic Auth\n  --acp-command <path>   ACP adapter command (default depends on backend)\n  --acp-arg <arg>        ACP adapter argument; repeatable\n  --root <path>          Allowed worktree root; repeatable\n  --cors <origin>        Allow browser requests from this exact origin; repeatable\n  --state-dir <path>     Persist bridge session snapshots\n  --log-requests         Log request method, path, and query\n  --help                 Show this help`
+  return `Usage: harness-remote-bridge [options]\n\nOptions:\n  --backend <name>       ACP backend: omp or pi (default: omp)\n  --host <host>          Bind host (default: 127.0.0.1)\n  --port <port>          Bind port (default: 4097)\n  --username <username>  Enable HTTP Basic Auth\n  --password <password>  Enable HTTP Basic Auth\n  --acp-command <path>   ACP adapter command (default depends on backend)\n  --acp-arg <arg>        ACP adapter argument; repeatable\n  --root <path>          Allowed worktree root; repeatable
+  --session-days <n>     Only list Sessions active within n days; 0 disables (default: 7)\n  --cors <origin>        Allow browser requests from this exact origin; repeatable\n  --state-dir <path>     Persist bridge session snapshots\n  --log-requests         Log request method, path, and query\n  --help                 Show this help`
 }

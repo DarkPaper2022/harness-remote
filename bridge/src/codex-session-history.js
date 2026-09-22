@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs"
-import { open, readdir } from "node:fs/promises"
+import { open, readFile, readdir } from "node:fs/promises"
 import { homedir } from "node:os"
 import path from "node:path"
 import { scanLinesBackward } from "./backward-line-scan.js"
@@ -167,7 +167,148 @@ async function readCodexPage(file, sessionID, { limit = 100, before } = {}) {
  * records also hold instruction blocks Codex feeds the model, AGENTS.md, the plugin list and desktop
  * app context under the `user` role, which would surface as the user's own turns.
  */
+const CODEX_STATE_DATABASE = /^state_(\d+)\.sqlite$/
+const CODEX_LIST_PAGE_LIMIT = 50
+const CODEX_LIST_CURSOR_PREFIX = "codex-created:"
+
+/**
+ * `codex app-server` answers `thread/list` by materialising every preview for the page, which costs
+ * seconds once a user has a few hundred threads. The same rows are already indexed in the small
+ * `state_<n>.sqlite` database, so reading them directly is the difference between a six-second
+ * startup stall and a few milliseconds. `node:sqlite` is only available on Node 22.5+, and the
+ * schema is Codex-owned, so every failure here must fall back to the ACP listing rather than throw.
+ */
+let sqliteModulePromise
+function loadSqliteModule() {
+  sqliteModulePromise ??= import("node:sqlite").catch(() => null)
+  return sqliteModulePromise
+}
+
+async function threadTableColumns(file) {
+  const sqlite = await loadSqliteModule()
+  if (!sqlite?.DatabaseSync) return undefined
+  let database
+  try {
+    database = new sqlite.DatabaseSync(file, { readOnly: true })
+    const columns = new Set(database.prepare("PRAGMA table_info(threads)").all().map((row) => row.name))
+    return columns.size > 0 ? columns : undefined
+  } catch {
+    return undefined
+  } finally {
+    database?.close()
+  }
+}
+
+async function codexStateDatabase(codexHome) {
+  let entries
+  try {
+    entries = await readdir(codexHome)
+  } catch {
+    return undefined
+  }
+  const candidates = entries
+    .map((name) => {
+      const match = CODEX_STATE_DATABASE.exec(name)
+      return match ? { name, version: Number(match[1]) } : undefined
+    })
+    .filter(Boolean)
+    .sort((left, right) => right.version - left.version)
+  for (const candidate of candidates) {
+    const columns = await threadTableColumns(path.join(codexHome, candidate.name))
+    if (columns) return { file: path.join(codexHome, candidate.name), columns }
+  }
+  return undefined
+}
+
+/** Only a top-level `model_provider` matters; a section-scoped one belongs to a profile. */
+async function codexConfiguredModelProvider(codexHome) {
+  let text
+  try {
+    text = await readFile(path.join(codexHome, "config.toml"), "utf8")
+  } catch {
+    return undefined
+  }
+  let section = false
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith("#")) continue
+    if (line.startsWith("[")) {
+      section = true
+      continue
+    }
+    if (section) continue
+    const match = /^model_provider\s*=\s*["']([^"']+)["']/.exec(line)
+    if (match) return match[1]
+  }
+  return undefined
+}
+
+function decodeCodexListCursor(cursor) {
+  if (typeof cursor !== "string" || !cursor.startsWith(CODEX_LIST_CURSOR_PREFIX)) return undefined
+  const value = Number(cursor.slice(CODEX_LIST_CURSOR_PREFIX.length))
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined
+}
+
+async function listCodexThreads({ codexHome, cursor, sinceMs, limit = CODEX_LIST_PAGE_LIMIT }) {
+  const database = await codexStateDatabase(codexHome)
+  if (!database) return undefined
+  const { file, columns } = database
+  for (const required of ["id", "cwd", "created_at_ms", "updated_at_ms", "archived", "source"]) {
+    if (!columns.has(required)) return undefined
+  }
+  const titleExpression = columns.has("name") && columns.has("preview")
+    ? "COALESCE(NULLIF(name, ''), preview, '')"
+    : columns.has("name")
+      ? "COALESCE(name, '')"
+      : columns.has("preview")
+        ? "COALESCE(preview, '')"
+        : "''"
+  const modelProvider = columns.has("model_provider") ? await codexConfiguredModelProvider(codexHome) : undefined
+  const beforeCreatedAt = cursor === undefined ? undefined : decodeCodexListCursor(cursor)
+  if (cursor !== undefined && beforeCreatedAt === undefined) return undefined
+  const boundedLimit = Math.max(1, Math.min(200, Number(limit) || CODEX_LIST_PAGE_LIMIT))
+
+  const sqlite = await loadSqliteModule()
+  let databaseHandle
+  try {
+    databaseHandle = new sqlite.DatabaseSync(file, { readOnly: true })
+    const conditions = ["archived = 0", "(source IS NULL OR source NOT LIKE '{%')"]
+    const parameters = []
+    if (Number.isFinite(sinceMs) && sinceMs > 0) {
+      conditions.push("updated_at_ms >= ?")
+      parameters.push(sinceMs)
+    }
+    if (modelProvider) {
+      conditions.push("model_provider = ?")
+      parameters.push(modelProvider)
+    }
+    if (beforeCreatedAt !== undefined) {
+      conditions.push("created_at_ms < ?")
+      parameters.push(beforeCreatedAt)
+    }
+    const rows = databaseHandle.prepare(`SELECT id, cwd, ${titleExpression} AS title, created_at_ms AS createdAtMs, updated_at_ms AS updatedAtMs FROM threads WHERE ${conditions.join(" AND ")} ORDER BY created_at_ms DESC LIMIT ?`).all(...parameters, boundedLimit + 1)
+    const hasMore = rows.length > boundedLimit
+    const page = hasMore ? rows.slice(0, boundedLimit) : rows
+    const sessions = page.map((row) => ({
+      sessionId: row.id,
+      cwd: row.cwd,
+      title: row.title || null,
+      updatedAt: Number.isFinite(row.updatedAtMs) ? new Date(row.updatedAtMs).toISOString() : undefined
+    }))
+    const last = page[page.length - 1]
+    return {
+      sessions,
+      ...(hasMore && last ? { nextCursor: `${CODEX_LIST_CURSOR_PREFIX}${last.createdAtMs}` } : {})
+    }
+  } catch {
+    return undefined
+  } finally {
+    databaseHandle?.close()
+  }
+}
+
 export function createCodexHistoryLoader(sessionRoot = path.join(homedir(), ".codex", "sessions")) {
+  const codexHome = process.env.CODEX_HOME || path.dirname(sessionRoot)
   const sessionFiles = new Map()
 
   async function locateSession(sessionID) {
@@ -211,5 +352,28 @@ export function createCodexHistoryLoader(sessionRoot = path.join(homedir(), ".co
 
   // Reading metadata must not take the single-writer lock from a desktop/CLI client.
   loadCodexHistory.readOnlyExternalMetadata = true
+  // A direct, indexed read of the Codex state database. Returns `undefined` whenever the schema or
+  // runtime cannot support it, which makes the caller fall back to the ACP `session/list` path.
+  loadCodexHistory.listSessions = (options = {}) => listCodexThreads({ codexHome, ...options })
+  loadCodexHistory.listSessionDirectories = async ({ sinceMs } = {}) => {
+    const database = await codexStateDatabase(codexHome)
+    if (!database) return []
+    const sqlite = await loadSqliteModule()
+    let databaseHandle
+    try {
+      databaseHandle = new sqlite.DatabaseSync(database.file, { readOnly: true })
+      const conditions = ["archived = 0", "cwd IS NOT NULL", "cwd <> ''"]
+      const parameters = []
+      if (Number.isFinite(sinceMs) && sinceMs > 0) {
+        conditions.push("updated_at_ms >= ?")
+        parameters.push(sinceMs)
+      }
+      return databaseHandle.prepare(`SELECT DISTINCT cwd FROM threads WHERE ${conditions.join(" AND ")}`).all(...parameters).map((row) => row.cwd)
+    } catch {
+      return []
+    } finally {
+      databaseHandle?.close()
+    }
+  }
   return loadCodexHistory
 }

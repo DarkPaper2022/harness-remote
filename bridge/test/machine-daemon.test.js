@@ -1,5 +1,8 @@
 import assert from "node:assert/strict"
 import { EventEmitter } from "node:events"
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import path from "node:path"
 import test from "node:test"
 import { MachineDaemon, createMachineDaemonServer } from "../src/machine-daemon.js"
 
@@ -500,6 +503,47 @@ test("daemon exposes registered host entries to its internal router", () => {
   assert.equal(entry.host, openCode)
 })
 
+test("daemon derives projects and the directory boundary from Session working directories", async () => {
+  const root = await realpath(await mkdtemp(path.join(tmpdir(), "harness-daemon-projects-")))
+  const project = path.join(root, "pdf", "CS", "pdf_reader")
+  await mkdir(project, { recursive: true })
+  try {
+    const daemon = new MachineDaemon({ id: "machine_projects", name: "workstation" })
+    const acp = new FakeAcp()
+    daemon.registerAcpHost({
+      id: "pi",
+      agent: acp,
+      serviceOptions: { historyLoader: { listSessionDirectories: async () => [project] } }
+    })
+    let bridgeOptions
+    let modelOptions
+    createMachineDaemonServer({
+      daemon,
+      // No configured root: the daemon must not fall back to `process.cwd()` and turn it into a
+      // project, which is exactly how `~/Documents` used to swallow every subdirectory.
+      config: { backend: "pi", port: 4097, roots: [] },
+      primaryAcp: acp,
+      primaryAgentID: "pi",
+      createServer: (options) => { bridgeOptions = options; return { acpService: { async claimSession() { return true }, async prompt() {}, async abort() {} }, emit() {} } },
+      createRouter: () => ({}),
+      createClaimServer: ({ innerServer }) => innerServer,
+      createLaunchServer: ({ innerServer }) => innerServer,
+      createModelServer: (options) => { modelOptions = options; return options.innerServer },
+      createFinishServer: ({ innerServer }) => innerServer,
+      createWorkThreadServerFactory: ({ innerServer }) => innerServer
+    })
+
+    assert.equal(typeof bridgeOptions.dynamicRoots, "function")
+    assert.equal(typeof bridgeOptions.serviceOptions.onSessionDirectories, "function")
+    assert.deepEqual(await bridgeOptions.dynamicRoots(), [project])
+
+    const projects = await modelOptions.projectCatalog()
+    assert.deepEqual(projects.map((entry) => entry.path), [project])
+    assert.equal(projects[0].configured, false)
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
 test("daemon shutdown closes ACP and terminates managed HTTP hosts", () => {
   const daemon = new MachineDaemon({ id: "machine_test", name: "workstation" })
   const acp = new FakeAcp()

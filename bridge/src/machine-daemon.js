@@ -207,7 +207,38 @@ export function createMachineDaemonServer({
   sessionOperationLedger,
   sessionLinkStore
 }) {
-  const bridgeServer = createServer({ config, acp: primaryAcp, machineRegistry: daemon.registry, serviceOptions })
+  // Project roots are learned from where Sessions actually ran. The daemon records every working
+  // directory a bridge reports and additionally asks each agent's history loader to enumerate the
+  // ones already on disk, so the catalog is complete even before the first listing finishes.
+  const learnedSessionDirectories = new Set()
+  const rememberSessionDirectories = (directories) => {
+    for (const directory of directories ?? []) learnedSessionDirectories.add(directory)
+  }
+  const sessionDirectories = async () => {
+    const all = new Set(learnedSessionDirectories)
+    // Match the listing window so a project only appears because a Session the app will actually
+    // show ran there. `0` means the operator wants the full history and therefore the full catalog.
+    const days = Number(config.sessionDays)
+    const sinceMs = Number.isFinite(days) && days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : undefined
+    for (const entry of daemon.hosts.values()) {
+      const loader = entry.serviceOptions?.historyLoader
+      if (typeof loader?.listSessionDirectories !== "function") continue
+      try {
+        for (const directory of await loader.listSessionDirectories({ sinceMs })) all.add(directory)
+      } catch {
+        // A backend that cannot enumerate its Sessions must not take the catalog down with it.
+      }
+    }
+    return [...all]
+  }
+
+  const bridgeServer = createServer({
+    config,
+    acp: primaryAcp,
+    machineRegistry: daemon.registry,
+    serviceOptions: { ...serviceOptions, onSessionDirectories: rememberSessionDirectories },
+    dynamicRoots: sessionDirectories
+  })
   const scopedAcpServers = new Map()
   // Writer ownership belongs to one live adapter process. An adapter that exits takes every loaded
   // Session with it, so remembering a claim across a restart made Stop skip the reload it needs and
@@ -230,16 +261,16 @@ export function createMachineDaemonServer({
       config: entry.bridgeConfig ?? { ...config, backend: agentID },
       acp: entry.host,
       machineRegistry: daemon.registry,
-      serviceOptions: entry.serviceOptions
+      serviceOptions: { ...entry.serviceOptions, onSessionDirectories: rememberSessionDirectories },
+      dynamicRoots: sessionDirectories
     })
     scopedAcpServers.set(agentID, server)
     return server
   }
   const machineID = daemon.snapshot().machine.id
-  const roots = config.roots?.length ? config.roots : [process.cwd()]
   const stateDirectory = config.stateDirectory ?? process.cwd()
   const tasks = taskStore ?? new TaskRunStore({ machineID, stateDirectory })
-  const projects = projectCatalog ?? (() => discoverProjects({ machineID, roots }))
+  const projects = projectCatalog ?? (async () => discoverProjects({ machineID, roots: config.roots ?? [], sessionDirectories: await sessionDirectories() }))
   const worktrees = worktreeManager ?? new WorktreeManager({ stateDirectory })
   const operations = sessionOperationLedger ?? new SessionOperationLedger({ machineID, stateDirectory })
   const links = sessionLinkStore ?? new SessionLinkStore({ machineID, stateDirectory })

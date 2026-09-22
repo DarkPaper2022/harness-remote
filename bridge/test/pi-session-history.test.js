@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { EventEmitter } from "node:events"
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, utimes, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import test from "node:test"
@@ -255,4 +255,28 @@ test("PI open, model load, refresh, rename and prompt never double-open the ACP 
   await service.prompt(session.sessionID, "Next prompt")
   assert.equal(acp.loads, 2, "the next prompt reopens PI exactly once")
   assert.equal(acp.prompts, 1)
+})
+
+test("PI recovers a Session's activity time from its journal because the adapter omits updatedAt", async () => {
+  const { root, sessionID, file } = await fixture()
+  const loader = createPiHistoryLoader(root)
+  assert.equal(await loader.sessionUpdatedAt("not a session id"), undefined)
+  assert.equal(await loader.sessionUpdatedAt("01missing"), undefined)
+
+  const activity = new Date("2026-09-20T08:30:00.000Z")
+  await utimes(file, activity, activity)
+  // A new loader so the assertion observes the on-disk time rather than the previous index.
+  assert.equal(await createPiHistoryLoader(root).sessionUpdatedAt(sessionID), activity.toISOString())
+})
+
+test("PI lists the working directories its journals recorded so projects need no configured root", async () => {
+  const { root, sessionID, project } = await fixture()
+  const second = path.join(root, "other-project")
+  await mkdir(second, { recursive: true })
+  await writeFile(
+    path.join(second, `2026-08-19T00-00-00-000Z_01pi-second.jsonl`),
+    `${JSON.stringify({ type: "session", version: 3, id: "01pi-second", timestamp: "2026-08-19T10:00:00.000Z", cwd: second })}\n`
+  )
+  const loader = createPiHistoryLoader(root)
+  assert.deepEqual((await loader.listSessionDirectories()).sort(), [project, second].sort())
 })

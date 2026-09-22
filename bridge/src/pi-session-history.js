@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs"
-import { appendFile, open, readdir } from "node:fs/promises"
+import { appendFile, open, readdir, stat } from "node:fs/promises"
 import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
 import path from "node:path"
@@ -191,25 +191,90 @@ async function readPiPage(file, sessionID, { limit = 100, before } = {}) {
   }
 }
 
+/**
+ * The PI ACP listing omits `updatedAt`, so the bridge has to recover activity time from the journal
+ * file. A directory scan is cheap (tens of files) but doing it per request is not, so the mapping is
+ * rebuilt at most once per TTL window and shared by every concurrent caller.
+ */
+const SESSION_INDEX_TTL_MS = 2_000
+
+/** The first journal line is the session header; only a small prefix ever has to be read for it. */
+async function readSessionCwd(file) {
+  let handle
+  try {
+    handle = await open(file, "r")
+    const buffer = Buffer.alloc(8 * 1024)
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0)
+    const newline = buffer.indexOf(0x0a, 0, bytesRead)
+    const record = parseRecordBuffer(buffer.subarray(0, newline === -1 ? bytesRead : newline))
+    return typeof record?.cwd === "string" && record.cwd ? record.cwd : undefined
+  } catch {
+    return undefined
+  } finally {
+    await handle?.close()
+  }
+}
+
 export function createPiHistoryLoader(sessionRoot = defaultSessionRoot()) {
   const sessionFiles = new Map()
+  let sessionIndexCache = null
+  let sessionIndexAt = 0
+  let sessionIndexPromise = null
+
+  async function buildSessionIndex() {
+    const byID = new Map()
+    let entries = []
+    try {
+      entries = await readdir(sessionRoot, { recursive: true, withFileTypes: true })
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error
+      return byID
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue
+      const stem = entry.name.slice(0, -".jsonl".length)
+      const separator = stem.lastIndexOf("_")
+      if (separator <= 0 || separator === stem.length - 1) continue
+      const sessionID = stem.slice(separator + 1)
+      if (!/^[A-Za-z0-9._-]+$/.test(sessionID)) continue
+      const file = path.join(entry.parentPath ?? entry.path, entry.name)
+      let mtimeMs = 0
+      try {
+        mtimeMs = (await stat(file)).mtimeMs
+      } catch {
+        continue
+      }
+      const known = byID.get(sessionID)
+      if (!known || mtimeMs > known.mtimeMs) byID.set(sessionID, { file, mtimeMs })
+    }
+    return byID
+  }
+
+  async function sessionIndex() {
+    const now = Date.now()
+    if (sessionIndexCache && now - sessionIndexAt < SESSION_INDEX_TTL_MS) return sessionIndexCache
+    if (!sessionIndexPromise) {
+      sessionIndexPromise = buildSessionIndex()
+        .then((byID) => {
+          sessionIndexCache = byID
+          sessionIndexAt = Date.now()
+          return byID
+        })
+        .finally(() => {
+          sessionIndexPromise = null
+        })
+    }
+    return sessionIndexPromise
+  }
 
   async function locateSession(sessionID) {
+    if (!/^[A-Za-z0-9._-]+$/.test(sessionID)) return undefined
     const known = sessionFiles.get(sessionID)
     if (known) return known
-    if (!/^[A-Za-z0-9._-]+$/.test(sessionID)) return undefined
-    try {
-      const suffix = `_${sessionID}.jsonl`
-      const entries = await readdir(sessionRoot, { recursive: true, withFileTypes: true })
-      const entry = entries.find((candidate) => candidate.isFile() && candidate.name.endsWith(suffix))
-      if (!entry) return undefined
-      const file = path.join(entry.parentPath ?? entry.path, entry.name)
-      sessionFiles.set(sessionID, file)
-      return file
-    } catch (error) {
-      if (error?.code === "ENOENT") return undefined
-      throw error
-    }
+    const entry = (await sessionIndex()).get(sessionID)
+    if (!entry) return undefined
+    sessionFiles.set(sessionID, entry.file)
+    return entry.file
   }
 
   const loadPiHistory = async (sessionID) => {
@@ -244,6 +309,29 @@ export function createPiHistoryLoader(sessionRoot = defaultSessionRoot()) {
   // ownership for models/prompts. A live ACP session is lifecycle state, not history authority.
   loadPiHistory.authoritativeHistory = true
   loadPiHistory.claimOnLoad = true
+  // PI's ACP adapter does not populate `updatedAt`. The journal file's modification time is the only
+  // reliable activity signal on the bridge host, and it is what keeps a recently-used Session from
+  // being filtered out of the default recent-activity window.
+  loadPiHistory.sessionUpdatedAt = async (sessionID) => {
+    if (!/^[A-Za-z0-9._-]+$/.test(sessionID)) return undefined
+    const entry = (await sessionIndex()).get(sessionID)
+    if (!entry || !Number.isFinite(entry.mtimeMs) || entry.mtimeMs <= 0) return undefined
+    return new Date(entry.mtimeMs).toISOString()
+  }
+  // Project discovery is derived from where Sessions actually ran, not from a configured root. The
+  // session header records the working directory, so reading one line per journal is enough. The
+  // window is optional and free here because the index already carries each file's modification
+  // time, which keeps a long-lived installation from reporting projects nobody touched in months.
+  loadPiHistory.listSessionDirectories = async ({ sinceMs } = {}) => {
+    const directories = new Set()
+    const cutoff = Number.isFinite(sinceMs) && sinceMs > 0 ? sinceMs : 0
+    for (const { file, mtimeMs } of (await sessionIndex()).values()) {
+      if (cutoff && mtimeMs < cutoff) continue
+      const cwd = await readSessionCwd(file)
+      if (cwd) directories.add(cwd)
+    }
+    return [...directories]
+  }
   loadPiHistory.renameSession = async (sessionID, title) => {
     const file = await locateSession(sessionID)
     if (!file) throw new Error("PI session journal not found")

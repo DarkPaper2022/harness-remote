@@ -77,3 +77,42 @@ test("symlinked children cannot escape the configured root boundary", async () =
     await rm(outside, { recursive: true, force: true })
   }
 })
+
+test("registers projects from Session working directories without any configured root", async () => {
+  const root = await tempRoot("harness-project-sessions-")
+  try {
+    const gitRoot = path.join(root, "repo")
+    const nested = path.join(gitRoot, "packages", "app")
+    const plain = path.join(root, "pdf", "CS", "pdf_reader")
+    await mkdir(path.join(gitRoot, ".git"), { recursive: true })
+    await mkdir(nested, { recursive: true })
+    await mkdir(plain, { recursive: true })
+
+    const projects = await discoverProjects({
+      machineID: "machine-1",
+      roots: [],
+      sessionDirectories: [nested, plain]
+    })
+    assert.deepEqual(projects.map((project) => ({ name: project.name, kind: project.kind, configured: project.configured })), [
+      { name: "pdf_reader", kind: "directory", configured: false },
+      { name: "repo", kind: "git", configured: false }
+    ], "a Session inside a repository reports the repository, and a non-Git directory reports itself")
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
+
+test("a configured container directory is not a project unless a Session ran in it", async () => {
+  const root = await tempRoot("harness-project-container-")
+  try {
+    const project = path.join(root, "Documents", "work")
+    await mkdir(project, { recursive: true })
+    const container = path.join(root, "Documents")
+    const withoutSession = await discoverProjects({ machineID: "machine-1", roots: [container] })
+    assert.deepEqual(withoutSession.map((entry) => entry.name), ["Documents"], "an explicitly configured root stays visible")
+    const fromSessions = await discoverProjects({ machineID: "machine-1", roots: [], sessionDirectories: [project] })
+    assert.deepEqual(fromSessions.map((entry) => entry.name), ["work"], "only where work happened becomes a project")
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+})
