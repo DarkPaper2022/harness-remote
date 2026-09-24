@@ -1318,10 +1318,27 @@ export class AcpService {
     this.#resetActionsForSessionChange(sessionID)
     if (this.#active.has(sessionID)) {
       const messageID = this.#recordPrompt(sessionID, text, attachments)
+      this.#emit("session.updated", sessionID)
+      if (this.#acp.steeringSupported) {
+        try {
+          const result = await this.#acp.request("_session/steering", {
+            sessionId: sessionID,
+            prompt: [
+              ...(text ? [{ type: "text", text }] : []),
+              ...attachments.map((attachment) => ({ type: "image", mimeType: attachment.mime, data: attachment.data }))
+            ]
+          })
+          if (result?.outcome === "injected" || result?.outcome === "startedNewTurn") {
+            this.#persistSnapshot(sessionID)
+            return
+          }
+        } catch {
+          // Steering failed or not accepted; fall back to turn queue
+        }
+      }
       const queue = this.#queues.get(sessionID) ?? []
       queue.push({ text, model, messageID, attachments, variant })
       this.#queues.set(sessionID, queue)
-      this.#emit("session.updated", sessionID)
       return
     }
     if (model) await this.setModel(sessionID, model, variant)

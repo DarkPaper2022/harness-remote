@@ -55,6 +55,7 @@ export class AcpClient extends EventEmitter {
   #agentInfo
   #promptCapabilities = {}
   #sessionCapabilities = {}
+  #steeringSupported = false
   #stderr = ""
   #stderrPartial = ""
   #processGroup
@@ -92,6 +93,10 @@ export class AcpClient extends EventEmitter {
    */
   get sessionCapabilities() {
     return this.#sessionCapabilities
+  }
+
+  get steeringSupported() {
+    return this.#steeringSupported
   }
 
   /** PID identifies extension runtime state published by this exact ACP process. */
@@ -191,6 +196,7 @@ export class AcpClient extends EventEmitter {
       this.#agentInfo = initialized.agentInfo
       this.#promptCapabilities = initialized.agentCapabilities?.promptCapabilities ?? {}
       this.#sessionCapabilities = initialized.agentCapabilities?.sessionCapabilities ?? {}
+      this.#steeringSupported = Boolean(initialized._meta?.steering?.supported)
       // The bridge always runs beside a harness the user already configured, so prefer a method
       // that uses those credentials. PI's adapter offers `anthropic-api-key` first and
       // `pi-stored-credentials` last: picking the first would claim an API key from an

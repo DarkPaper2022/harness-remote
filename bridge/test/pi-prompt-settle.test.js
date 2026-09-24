@@ -117,3 +117,61 @@ test("PI open session does not double-resume when commands or prompts run", asyn
   assert.equal(calls.filter((c) => c.method === "session/prompt").length, 1)
 })
 
+test("steer injects messages into an active session turn when steering is supported", async () => {
+  const calls = []
+  let resolvePrompt
+  class PiSteeringAcp extends EventEmitter {
+    processID = 1234
+    sessionCapabilities = { resume: true }
+    steeringSupported = true
+    promptCapabilities = {}
+    async start() {}
+    async listSessions() { return [{ sessionId: "steer-session", cwd: "/test" }] }
+    async listSessionPage() { return { sessions: [{ sessionId: "steer-session", cwd: "/test" }] } }
+    async request(method, params) {
+      calls.push({ method, params })
+      if (method === "session/resume") return { configOptions: [] }
+      if (method === "session/prompt") {
+        return new Promise((resolve) => { resolvePrompt = resolve })
+      }
+      if (method === "_session/steering") {
+        return { outcome: "injected" }
+      }
+      throw new Error(`Unexpected request: ${method}`)
+    }
+  }
+
+  const historyLoader = async () => []
+  historyLoader.authoritativeHistory = true
+  historyLoader.claimOnLoad = true
+
+  const acp = new PiSteeringAcp()
+  const service = new AcpService(acp, { historyLoader })
+
+  // Start the first prompt (which stays in flight)
+  void service.prompt("steer-session", "Long running turn")
+  await new Promise((r) => setTimeout(r, 20))
+
+  assert.equal(calls.filter((c) => c.method === "session/prompt").length, 1)
+
+  // Send a second prompt while the first turn is active
+  await service.prompt("steer-session", "Injected follow-up")
+
+  // Must call _session/steering rather than queuing for after prompt resolves
+  const steerCalls = calls.filter((c) => c.method === "_session/steering")
+  assert.equal(steerCalls.length, 1)
+  assert.equal(steerCalls[0].params.sessionId, "steer-session")
+  assert.deepEqual(steerCalls[0].params.prompt, [{ type: "text", text: "Injected follow-up" }])
+
+  // Both user prompts are visible in transcript
+  const messages = await service.messages("steer-session")
+  assert.equal(messages.length, 2)
+  assert.equal(messages[0].parts[0].text, "Long running turn")
+  assert.equal(messages[1].parts[0].text, "Injected follow-up")
+
+  // Resolve the prompt to cleanly settle
+  resolvePrompt?.({})
+  await new Promise((r) => setTimeout(r, 20))
+})
+
+
