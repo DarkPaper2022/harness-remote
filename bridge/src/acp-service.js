@@ -1073,8 +1073,10 @@ export class AcpService {
   async actions(sessionID) {
     if (await this.#readOnlyExternalMetadata(sessionID)) return []
     if (!this.#commandCatalogs.has(sessionID)) {
-      await this.#load(sessionID, true, true)
-      await this.#waitForCommandCatalog(sessionID)
+      if (!this.#acpOpenSessions.has(sessionID)) {
+        await this.#load(sessionID, true, true)
+        await this.#waitForCommandCatalog(sessionID)
+      }
     }
     await this.#refreshActionState(sessionID)
     return this.#availableActions(sessionID)
@@ -1086,6 +1088,12 @@ export class AcpService {
   async commands(sessionID) {
     if (sessionID) {
       if (await this.#readOnlyExternalMetadata(sessionID)) return []
+      if (this.#acpOpenSessions.has(sessionID)) {
+        const known = this.#commandCatalogs.get(sessionID)
+        if (known) return commandInfoList(known)
+        const catalogs = [...this.#commandCatalogs.values()]
+        return commandInfoList(catalogs.at(-1) ?? [])
+      }
       if (!this.#commandCatalogs.has(sessionID)) {
         await this.#load(sessionID, true, true)
         await this.#waitForCommandCatalog(sessionID)
