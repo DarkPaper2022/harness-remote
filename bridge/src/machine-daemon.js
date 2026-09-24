@@ -1,5 +1,7 @@
 import { createAgentRoutingServer } from "./agent-router.js"
 import { createAgentModelServer } from "./agent-model-server.js"
+import { createCrossMachineHandoffServer } from "./cross-machine-handoff-server.js"
+import { createCrossMachineTargetRuntime } from "./cross-machine-target-runtime.js"
 import { MachineRegistry, trackAgentHostLifecycle } from "./machine-registry.js"
 import { trackManagedHostLifecycle } from "./opencode-host.js"
 import { discoverProjects } from "./project-catalog.js"
@@ -194,6 +196,7 @@ export function createMachineDaemonServer({
   createServer = createBridgeServer,
   createRouter = createAgentRoutingServer,
   createClaimServer = createSessionClaimServer,
+  createCrossMachineHandoffServerFactory = createCrossMachineHandoffServer,
   createModelServer = createAgentModelServer,
   createLaunchServer = createTaskLaunchServer,
   createFinishServer = createTaskFinishServer,
@@ -292,6 +295,12 @@ export function createMachineDaemonServer({
       else sessionMutations.delete(key)
     }
   }
+  const crossMachineTargetRuntime = createCrossMachineTargetRuntime({
+    daemon,
+    machineID,
+    acpService,
+    sessionLinkStore: links
+  })
   const claimedAgents = new Set()
   const claimSession = async (agentID, sessionID) => {
     const entry = daemon.hostEntry(agentID)
@@ -732,7 +741,15 @@ export function createMachineDaemonServer({
     operationLedger: operations,
     sessionLinkStore: links
   })
-  const launchServer = createLaunchServer({ innerServer: claimServer, config, taskRunController: runs })
+  const crossMachineHandoffServer = createCrossMachineHandoffServerFactory({
+    innerServer: claimServer,
+    config,
+    projectCatalog: projects,
+    operationLedger: operations,
+    createTargetSession: crossMachineTargetRuntime.createTargetSession,
+    reconcileTargetSession: crossMachineTargetRuntime.reconcileTargetSession
+  })
+  const launchServer = createLaunchServer({ innerServer: crossMachineHandoffServer, config, taskRunController: runs })
   const modelServer = createModelServer({ innerServer: launchServer, config, daemon, taskStore: tasks, projectCatalog: projects })
   const finishServer = createFinishServer({ innerServer: modelServer, config, taskStore: tasks, worktreeManager: worktrees, taskRunController: runs })
   return createWorkThreadServerFactory({ innerServer: finishServer, config, controller: threads })

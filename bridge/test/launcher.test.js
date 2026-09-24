@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import path from "node:path"
 import test from "node:test"
-import { bridgeEnvironment, buildBridgeArgs, buildDaemonArgs, canListenForBind, createManagedShutdown, detectBackends, lanAddresses, resolveBackend, resolveLaunchPlan, startManagedOpenCode } from "../src/launcher.js"
+import { bridgeEnvironment, buildBridgeArgs, buildDaemonArgs, canListenForBind, createManagedShutdown, detectBackends, formatStartupSummary, lanAddresses, resolveBackend, resolveLaunchPlan, startManagedOpenCode } from "../src/launcher.js"
 
 test("detects executable agent files on PATH without running them", () => {
   const pathValue = ["/bin", "/tools"].join(path.delimiter)
@@ -81,6 +81,40 @@ test("requires an installed or explicit backend when discovery finds none", () =
   assert.throws(() => resolveLaunchPlan([], []), /No supported agent CLI was found on PATH/)
 })
 
+test("startup summary prints one non-clickable address and a plain harness list", () => {
+  const summary = formatStartupSummary({
+    plan: { mode: "daemon", backend: "codex", detected: ["omp", "pi", "codex", "opencode"], openCode: true },
+    addresses: ["192.168.1.42", "192.168.1.43"],
+    port: 4097,
+    username: "harness",
+    password: "secret"
+  })
+  assert.match(summary, /Address\s+192\.168\.1\.42:4097/)
+  assert.doesNotMatch(summary, /192\.168\.1\.43/)
+  assert.doesNotMatch(summary, /https?:\/\//)
+  assert.doesNotMatch(summary, /Open in browser/)
+  assert.match(summary, /• omp/)
+  assert.match(summary, /• pi/)
+  assert.match(summary, /• codex/)
+  assert.match(summary, /• opencode/)
+  assert.doesNotMatch(summary, /— primary|starts on first use|— available|managed, starts/)
+  assert.match(summary, /Machines → Add machine/)
+})
+
+test("keeps the single-backend startup summary simple", () => {
+  const summary = formatStartupSummary({
+    plan: { mode: "single", backend: "pi", detected: ["pi"] },
+    addresses: [],
+    port: 4097,
+    username: "harness",
+    password: "secret"
+  })
+  assert.match(summary, /Harness  pi/)
+  assert.match(summary, /<LAN address>:4097/)
+  assert.doesNotMatch(summary, /https?:\/\//)
+  assert.doesNotMatch(summary, /Harnesses/)
+})
+
 test("injects quick-start defaults but never places credentials or launcher-only flags on child argv", () => {
   const argv = buildBridgeArgs(["--root", "/work", "--single", "--username", "harness", "--password", "secret"], { backend: "codex", host: "0.0.0.0", port: 4098 })
   assert.deepEqual(argv, ["--root", "/work", "--backend", "codex", "--host", "0.0.0.0", "--port", "4098"])
@@ -88,6 +122,7 @@ test("injects quick-start defaults but never places credentials or launcher-only
   const environment = bridgeEnvironment({ PATH: "/bin" }, "harness", "secret")
   assert.equal(environment.HARNESS_REMOTE_USERNAME, "harness")
   assert.equal(environment.HARNESS_REMOTE_PASSWORD, "secret")
+  assert.equal(environment.HARNESS_REMOTE_LAUNCHED_BY_LAUNCHER, "1")
   assert.equal(environment.PATH, "/bin")
 })
 

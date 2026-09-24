@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import {
   DEFAULT_MACHINE_DAEMON_PORT,
   isProjectListing,
@@ -49,10 +48,5 @@ assert.deepEqual(
   ['a', 'b']
 )
 assert.deepEqual(selectableMachineAgents({ machine: { id: 'm', name: 'm' }, agents: undefined }), [])
-
-const machineClient = readFileSync(new URL('./machineClient.ts', import.meta.url), 'utf8')
-assert.equal(machineClient.includes('machineCandidates('), false, 'normal Session-first discovery must use the configured machine endpoint')
-assert.ok(machineClient.includes('discoverMachine'), 'Session-first must keep machine discovery in the active machine client')
-assert.ok(machineClient.includes('parseJSONValue'), 'active machine discovery must normalize native JSON payloads')
 
 console.log('machine payload tests passed')

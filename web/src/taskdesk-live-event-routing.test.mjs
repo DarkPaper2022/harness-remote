@@ -47,25 +47,106 @@ test("OpenCode completion lifecycle reconciles status and the selected transcrip
   assert.doesNotMatch(lifecycle, /send|prompt|continueWorkThread/)
 })
 
+test("pending permission/question never masquerades as terminal lifecycle", () => {
+  const refresh = readFileSync(new URL("./taskdesk-session-live-refresh.ts", import.meta.url), "utf8")
+  const attentionLifecycle = refresh.match(/if \(isAttentionEvent\(event\.type\)\) \{[\s\S]*?\n      \}/)?.[0] || ""
+
+  assert.match(refresh, /type === "permission\.replied"/)
+  assert.match(refresh, /type === "question\.replied"/)
+  assert.match(refresh, /type === "question\.rejected"/)
+  assert.match(attentionLifecycle, /throttle\("detail", [^,]+, onDetail\)/)
+  assert.match(attentionLifecycle, /throttle\("message", [^,]+, onMessage\)/)
+  assert.match(attentionLifecycle, /if \(isAttentionResolutionEvent\(event\.type\)\)/)
+  assert.match(attentionLifecycle, /throttle\("index", [^,]+, onIndex\)/)
+  assert.match(attentionLifecycle, /settleAfterLifecycle\(\)/)
+
+  const resolutionGuard = attentionLifecycle.indexOf("if (isAttentionResolutionEvent(event.type))")
+  assert.ok(resolutionGuard >= 0)
+  assert.ok(attentionLifecycle.indexOf('throttle("index"', resolutionGuard) > resolutionGuard)
+  assert.ok(attentionLifecycle.indexOf("settleAfterLifecycle()", resolutionGuard) > resolutionGuard)
+  assert.doesNotMatch(attentionLifecycle.slice(0, resolutionGuard), /throttle\("index"|settleAfterLifecycle\(\)/)
+  assert.doesNotMatch(attentionLifecycle, /send|prompt|continueWorkThread/)
+})
+
+test("OpenCode permission replies stay fail-closed at the UI boundary", () => {
+  const attention = readFileSync(new URL("./components/work-thread-attention.tsx", import.meta.url), "utf8")
+  const api = readFileSync(new URL("./api.ts", import.meta.url), "utf8")
+  const responder = attention.match(/async function respondPermission\([\s\S]*?\n  \}/)?.[0] || ""
+
+  assert.match(api, /replyPermission\(config: ServerConfig, requestID: string, reply: "once" \| "always" \| "reject"/)
+  assert.match(api, /body: \{ reply \}/)
+  assert.match(responder, /await api\.replyPermission\(config, request\.id, reply, directory\)/)
+  assert.match(responder, /void persistSuccessfulPermissionDecision\(request, reply\)\.catch/)
+  assert.match(responder, /await settleResolvedAttention\(onResolved, config\.backend\)/)
+  assert.match(responder, /catch \(reason\)[\s\S]*?setError\(/)
+  assert.match(attention, /export async function settleResolvedAttention/)
+  assert.match(attention, /await onResolved\(\)[\s\S]*?if \(backend !== "opencode"\) return[\s\S]*?setTimeout\([\s\S]*?await onResolved\(\)/, "native attention ACK must reconcile once for every backend and add a bounded trailing pass only for OpenCode")
+
+  const nativeReply = responder.indexOf("await api.replyPermission")
+  const metadata = responder.indexOf("persistSuccessfulPermissionDecision")
+  const refresh = responder.indexOf("await settleResolvedAttention(onResolved, config.backend)")
+  assert.ok(nativeReply >= 0 && metadata > nativeReply && refresh > nativeReply, "native OpenCode reply must succeed before local metadata or bounded OpenCode resolution refresh")
+
+  // A failed POST must leave the authoritative request in props. Never optimistically remove it,
+  // clear Attention, or record an allow/deny before the native harness acknowledges the decision.
+  assert.doesNotMatch(responder.slice(0, nativeReply), /persistSuccessfulPermissionDecision|settleResolvedAttention|onResolved|setPermissions|filter\(/)
+  assert.doesNotMatch(responder, /setPermissions|permissions\.filter/)
+})
+
+test("OpenCode reliability regressions stay in the required browser gate", () => {
+  const workflow = readFileSync(new URL("../../.github/workflows/pr-checks.yml", import.meta.url), "utf8")
+  const browserSmoke = readFileSync(new URL("../scripts/native-opencode-browser-smoke.mjs", import.meta.url), "utf8")
+  const realSmoke = readFileSync(new URL("../scripts/native-opencode-real-regression-smoke.mjs", import.meta.url), "utf8")
+  const permissionSmoke = readFileSync(new URL("../scripts/native-opencode-permission-regression-smoke.mjs", import.meta.url), "utf8")
+  const permissionApi = readFileSync(new URL("./opencode-permission-api.test.mjs", import.meta.url), "utf8")
+
+  for (const marker of [
+    "OPENCODE-TRANSIENT-INTERRUPTION-PROMPT",
+    "OPENCODE-LATE-RECOVERY-PROMPT",
+    "OPENCODE-TERMINAL-INTERRUPTION-PROMPT",
+    "OPENCODE-TERMINAL-PROVIDER-ERROR-PROMPT",
+    "OPENCODE-PERSISTED-WITHOUT-FINAL-EVENT-PROMPT"
+  ]) assert.ok(browserSmoke.includes(marker), `missing historical OpenCode browser regression: ${marker}`)
+  assert.match(realSmoke, /mounted completion lag/)
+  assert.match(realSmoke, /without navigation/)
+
+  assert.match(permissionSmoke, /permission\.asked/)
+  assert.match(permissionSmoke, /permission\.replied/)
+  assert.match(permissionSmoke, /Response interrupted/)
+  assert.match(permissionSmoke, /reply: "reject"/)
+  assert.match(permissionSmoke, /reply: "once"/)
+  assert.match(permissionSmoke, /opening an unresolved Session must not consume Attention/)
+  assert.match(permissionSmoke, /permission resolution left mounted Activity running/)
+  assert.doesNotMatch(permissionSmoke, /page\.reload\(/)
+
+  assert.match(permissionApi, /failed OpenCode permission reply rejects and remains retryable/)
+  assert.match(permissionApi, /native permission reply failed/)
+  assert.ok(
+    workflow.includes("node scripts/run-vite-test.mjs src/opencode-permission-api.test.mjs"),
+    "OpenCode permission transport failure regression is not a required PR gate"
+  )
+
+  for (const script of [
+    "native-opencode-browser-smoke.mjs",
+    "native-opencode-real-regression-smoke.mjs",
+    "native-opencode-permission-regression-smoke.mjs"
+  ]) assert.ok(workflow.includes(`node scripts/${script}`), `${script} is not a required Chromium PR gate`)
+})
+
 test("foregrounding the app immediately reconciles durable conversation state", () => {
   const refresh = readFileSync(new URL("./taskdesk-session-live-refresh.ts", import.meta.url), "utf8")
 
-  // Android may keep the native SSE reader alive while WebView JavaScript is suspended, so events
-  // produced in the background cannot be the only way the renderer catches up on resume.
   assert.match(refresh, /CapacitorApp\.addListener\("appStateChange"/)
   assert.match(refresh, /if \(isActive\) reconcileAfterForeground\(\)/)
   assert.match(refresh, /document\.addEventListener\("visibilitychange", onVisibilityChange\)/)
   assert.match(refresh, /window\.addEventListener\("pageshow", onPageShow\)/)
 
-  // Resume must re-read both authoritative Conversation state and the selected transcript/attention
-  // surfaces. It must not resend a prompt or depend on a new live event arriving.
   const foreground = refresh.match(/const reconcileAfterForeground = \(\) => \{[\s\S]*?\n  \}/)?.[0] || ""
   assert.match(foreground, /onIndex\(\)/)
   assert.match(foreground, /onMessage\(\)/)
   assert.match(foreground, /onDetail\(\)/)
   assert.doesNotMatch(foreground, /send|prompt|continueWorkThread/)
 
-  // Lifecycle listeners cannot accumulate as Conversations are opened and closed.
   assert.match(refresh, /document\.removeEventListener\("visibilitychange", onVisibilityChange\)/)
   assert.match(refresh, /window\.removeEventListener\("pageshow", onPageShow\)/)
   assert.match(refresh, /appStateHandle.*remove\(\)/)

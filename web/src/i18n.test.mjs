@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { createTranslator, languageOptions, normalizeLanguage } from './i18n.ts'
 
 assert.equal(normalizeLanguage('it'), 'it')
@@ -35,6 +36,36 @@ assert.equal(zh('detail.nothingToUndo'), '此工作階段沒有可復原的內�
 assert.equal(en('detail.sessionActions'), 'Session actions')
 assert.equal(it('detail.sessionActions'), 'Azioni sessione')
 assert.equal(zh('detail.sessionActions'), '工作階段動作')
+
+const source = readFileSync(new URL('./i18n.ts', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+const languageMarkers = [
+  ['en', '  en: {'],
+  ['it', '  it: {'],
+  ['zh-TW', "  'zh-TW': {"],
+  ['zh-CN', "  'zh-CN': {"]
+]
+const languageStarts = Object.fromEntries(languageMarkers.map(([code, marker]) => [code, source.indexOf(marker)]))
+const languageEnd = source.indexOf('\n  }\n}\n\nexport const languageOptions', languageStarts['zh-CN']) + 4
+const keysFor = (code, nextCode) => {
+  const start = languageStarts[code]
+  const end = nextCode ? languageStarts[nextCode] : languageEnd
+  return [...source.slice(start, end).matchAll(/^\s*'([^']+)':/gm)]
+    .map((match) => match[1])
+    .filter((key) => !languageMarkers.some(([language]) => language === key))
+}
+const englishKeys = keysFor('en', 'it')
+for (const [code, nextCode] of [['it', 'zh-TW'], ['zh-TW', 'zh-CN'], ['zh-CN', null]]) {
+  const translated = new Set(keysFor(code, nextCode))
+  const missing = englishKeys.filter((key) => !translated.has(key))
+  assert.deepEqual(missing, [], `${code} must translate every English i18n key`)
+}
+
+assert.equal(it('sf.scanAnotherMachine'), 'Scansiona un’altra macchina')
+assert.equal(it('sf.viewSessions'), 'Vai alle sessioni')
+assert.equal(zh('sf.scanAnotherMachine'), '掃描另一台機器')
+assert.equal(zhCN('sf.scanAnotherMachine'), '扫描另一台机器')
+assert.equal(zh('command.openSettings'), '開啟設定')
+assert.equal(zhCN('detail.attachImage'), '附加图片')
 
 // Unknown keys should remain visible during development instead of rendering blank UI.
 assert.equal(en('missing.key'), 'missing.key')

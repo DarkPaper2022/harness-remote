@@ -462,6 +462,7 @@ export class AcpService {
   #preserveListedTimestamps
   #reloadOnHistoryRefresh
   #replaySettleMs
+  #promptSettleMs
   #preferListedTitles
   #nativeRenameCommand
   #journalPageWhileOwned
@@ -472,6 +473,11 @@ export class AcpService {
     preserveListedTimestamps = false,
     reloadOnHistoryRefresh = true,
     replaySettleMs = 0,
+    // Some ACP adapters (PI in particular) acknowledge session/prompt before their final stdout
+    // notifications have reached the bridge. Keep the turn live for this short drain window so a
+    // late reasoning chunk is settled with the rest of the completed turn rather than becoming a
+    // permanent Activity spinner.
+    promptSettleMs = 0,
     preferListedTitles = false,
     nativeRenameCommand,
     /**
@@ -500,6 +506,7 @@ export class AcpService {
     this.#preserveListedTimestamps = preserveListedTimestamps
     this.#reloadOnHistoryRefresh = reloadOnHistoryRefresh
     this.#replaySettleMs = replaySettleMs
+    this.#promptSettleMs = promptSettleMs
     this.#preferListedTitles = preferListedTitles
     this.#nativeRenameCommand = nativeRenameCommand
     this.#journalPageWhileOwned = journalPageWhileOwned
@@ -1362,9 +1369,20 @@ export class AcpService {
         this.#recordTurnFailure(sessionID, error.message)
         this.#emit("session.error", sessionID, { message: error.message })
       }
-    }).finally(() => {
+    }).finally(async () => {
+      if (this.#turnGenerations.get(sessionID) !== generation) return
+      // PI can write the JSON-RPC response before its final session/update notification. Do not
+      // clear #active until that tiny transport tail has drained: #handleNotification deliberately
+      // accepts those chunks, and otherwise they arrive after #settleActivity has already run.
+      if (this.#promptSettleMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, this.#promptSettleMs))
+      }
       if (this.#turnGenerations.get(sessionID) !== generation) return
       this.#active.delete(sessionID)
+      // Older adapters intentionally deliver assistant chunks after their RPC response, so their
+      // historical zero-drain behavior must stay permissive. PI opts into a real drain window above;
+      // once it closes, an even later chunk belongs to a subsequent native lifecycle, not this turn.
+      if (this.#promptSettleMs > 0) this.#promptedSessions.delete(sessionID)
       this.#chunkMessageIDs.delete(`${sessionID}:assistant`)
       // The turn is over, so no activity it started is still running, whatever the adapter said.
       this.#settleActivity(sessionID)

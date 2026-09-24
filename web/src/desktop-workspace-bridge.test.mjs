@@ -4,11 +4,19 @@ const calls = {
   replace: [],
   request: [],
   subscribe: [],
-  unsubscribe: []
+  unsubscribe: [],
+  attention: [],
+  runtimeGet: 0,
+  runtimeRetry: 0
 }
 
+let attentionActivation
 let releaseFirstSync
 const firstSyncGate = new Promise((resolve) => { releaseFirstSync = resolve })
+let runtimeState = {
+  status: "ready",
+  machine: { profileId: "desktop-local-runtime", host: "127.0.0.1", port: 4111, pid: 1234 }
+}
 
 globalThis.window = {
   harnessDesktop: {
@@ -35,6 +43,14 @@ globalThis.window = {
         : { ok: true }
       return Promise.resolve({ ok: true, response: { status: 200, data, headers: {} } })
     },
+    getLocalRuntimeState() {
+      calls.runtimeGet += 1
+      return Promise.resolve(runtimeState)
+    },
+    retryLocalRuntime() {
+      calls.runtimeRetry += 1
+      return Promise.resolve(runtimeState)
+    },
     subscribeEvents(profileId, options) {
       calls.subscribe.push({ profileId, options })
       return Promise.resolve("sub-1")
@@ -44,6 +60,16 @@ globalThis.window = {
       return Promise.resolve()
     },
     notifyCompletion() { return Promise.resolve() },
+    notifyAttention(notification) {
+      calls.attention.push(notification)
+      return Promise.resolve()
+    },
+    onAttentionActivated(callback) {
+      attentionActivation = callback
+      return () => {
+        if (attentionActivation === callback) attentionActivation = undefined
+      }
+    },
     onMenuCommand() { return () => {} },
     setApplicationMenu() { return Promise.resolve(true) }
   }
@@ -139,6 +165,24 @@ assert.deepEqual(calls.subscribe[0].options, {
 })
 subscription.close()
 
+const notification = {
+  title: "Authorization required",
+  body: "write_file\nThe Session remains blocked until you allow or deny this request.",
+  overlayDescription: "Authorization required · Local · Codex",
+  target: { machineID: "native-machine", agentID: "codex", sessionID: "session-123" }
+}
+bridge.notifyDesktopAttention(notification)
+await Promise.resolve()
+assert.deepEqual(calls.attention, [notification])
+
+const activated = []
+const unsubscribeAttention = bridge.subscribeDesktopAttentionActivation((target) => activated.push(target))
+attentionActivation?.(notification.target)
+assert.deepEqual(activated, [notification.target])
+unsubscribeAttention()
+attentionActivation?.({ machineID: "other", agentID: "codex", sessionID: "ignored" })
+assert.equal(activated.length, 1, "unsubscribed attention activation must not leak callbacks")
+
 const lan = {
   id: "machine-lan",
   name: "LAN",
@@ -152,5 +196,59 @@ const lan = {
 }
 await bridge.syncDesktopProfiles([lan])
 assert.equal(bridge.desktopProfileID({ ...lan.config, backend: "omp", agentId: "omp" }), "machine-lan")
+
+// The embedded runtime endpoint is public to the renderer, but its credentials are not. Once the
+// state has been read, host+port map to the volatile main-process profile and requests route there.
+const ready = await bridge.desktopLocalRuntimeState()
+assert.equal(calls.runtimeGet, 1)
+assert.deepEqual(ready, runtimeState)
+const localConfig = {
+  backend: "codex",
+  agentId: "codex",
+  host: runtimeState.machine.host,
+  port: runtimeState.machine.port,
+  username: "",
+  password: ""
+}
+assert.equal(bridge.desktopProfileID(localConfig), "desktop-local-runtime")
+const localResult = await bridge.desktopRequestResult(localConfig, { path: "/session/local" })
+assert.equal(localResult.ok, true)
+assert.equal(calls.request.at(-1).profileId, "desktop-local-runtime")
+assert.deepEqual(calls.request.at(-1).request.route, { backend: "codex", agentId: "codex" })
+
+// Polling the embedded runtime is a health check, not a reason to rebuild the renderer's machine
+// list. Electron IPC returns a fresh object on every call; an unchanged semantic state must retain
+// the prior object identity so React does not restart an unrelated slow/offline machine discovery.
+runtimeState = {
+  status: "ready",
+  machine: { profileId: "desktop-local-runtime", host: "127.0.0.1", port: 4111, pid: 1234 }
+}
+const sameReady = await bridge.desktopLocalRuntimeState()
+assert.equal(calls.runtimeGet, 2)
+assert.strictEqual(sameReady, ready, "unchanged runtime polls must preserve object identity")
+
+runtimeState = {
+  status: "ready",
+  machine: { profileId: "desktop-local-runtime", host: "127.0.0.1", port: 4111, pid: 4321 }
+}
+const restartedReady = await bridge.desktopLocalRuntimeState()
+assert.equal(calls.runtimeGet, 3)
+assert.notStrictEqual(restartedReady, sameReady, "a real runtime restart must produce a new state object")
+assert.equal(restartedReady.machine.pid, 4321)
+
+// Even if a composed workspace snapshot contains the local projection, renderer synchronization
+// must never attempt to persist/replace the volatile main-process profile.
+await bridge.syncDesktopProfiles([
+  lan,
+  {
+    id: "desktop-local-runtime",
+    config: { ...localConfig, backend: "opencode", agentId: undefined }
+  }
+])
+assert.deepEqual(calls.replace.at(-1).profiles.map((profile) => profile.id), ["machine-lan"])
+
+runtimeState = { status: "unavailable", error: "not installed" }
+assert.deepEqual(await bridge.retryDesktopLocalRuntime(), runtimeState)
+assert.equal(calls.runtimeRetry, 1)
 
 console.log("desktop workspace bridge regression tests passed")

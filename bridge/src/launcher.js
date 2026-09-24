@@ -157,7 +157,8 @@ export function bridgeEnvironment(environment, username, password) {
   return {
     ...environment,
     HARNESS_REMOTE_USERNAME: username,
-    HARNESS_REMOTE_PASSWORD: password
+    HARNESS_REMOTE_PASSWORD: password,
+    HARNESS_REMOTE_LAUNCHED_BY_LAUNCHER: "1"
   }
 }
 
@@ -221,8 +222,31 @@ export function lanAddresses(interfaces = networkInterfaces()) {
   return [...new Set((preferred.length ? preferred : candidates).map(({ address }) => address))]
 }
 
+export function formatStartupSummary({ plan, addresses, port, username, password }) {
+  const address = addresses[0]
+  const machineAddress = address ? `${address}:${port}` : `<LAN address>:${port}`
+  const lines = [
+    "Harness Remote",
+    "",
+    "Connection",
+    `  Address   ${machineAddress}`,
+    `  Username  ${username}`,
+    `  Password  ${password}`
+  ]
+
+  if (plan.mode === "daemon") {
+    lines.push("", "Harnesses")
+    for (const agent of plan.detected) lines.push(`  • ${agent}`)
+  } else {
+    lines.push("", `Harness  ${plan.backend}`)
+  }
+
+  lines.push("", "Manual setup: Harness Remote → Machines → Add machine, then use the connection details above.")
+  return `${lines.join("\n")}\n`
+}
+
 export function launcherUsage() {
-  return `Usage: harness-remote [options]\n\nQuick start options:\n  --backend <name>       Select omp, pi, claude, codex, or opencode (on multi-agent machines, selects the daemon primary)\n  --single               Force the legacy single-backend path instead of the machine daemon\n  --host <host>          Bind host (quick-start default: 0.0.0.0)\n  --port <port>          Preferred port (OpenCode single-host default: 4096; daemon/ACP default: 4097)\n  --username <username>  Override generated Basic Auth username\n  --password <password>  Override generated Basic Auth password\n  --help                 Show this help\n\nWith one detected agent, Harness starts the existing single-backend path. With multiple detected agents and at least one ACP backend, it starts the machine daemon automatically; OpenCode is included when installed and receives a free loopback port automatically.`
+  return `Usage: harness-remote [options]\n\nQuick start options:\n  --backend <name>       Select omp, pi, claude, codex, or opencode (on multi-agent machines, selects the daemon primary)\n  --single               Force the legacy single-backend path instead of the machine daemon\n  --host <host>          Bind host (quick-start default: 0.0.0.0)\n  --port <port>          Preferred port (OpenCode single-host default: 4096; daemon/ACP default: 4097)\n  --username <username>  Override generated Basic Auth username\n  --password <password>  Override generated Basic Auth password\n  --cors <origin>        Allow a browser client from this exact origin; repeatable\n  --help                 Show this help\n\nWith one detected agent, Harness starts the existing single-backend path. With multiple detected agents and at least one ACP backend, it starts the machine daemon automatically and exposes every detected ACP harness through the machine endpoint; OpenCode is included when installed and receives a free loopback port automatically.`
 }
 
 export async function startManagedOpenCode({ host, port, username, password, command = "opencode", Host = ManagedOpenCodeHost } = {}) {
@@ -313,41 +337,19 @@ async function main() {
   if (!username) ({ username, password } = generateCredentials())
 
   const addresses = host === "0.0.0.0" ? lanAddresses() : [host]
-
-  process.stdout.write("Harness Remote\n\n")
-  process.stdout.write("Configure this server in Harness Remote:\n")
-  if (addresses.length) {
-    for (const address of addresses) process.stdout.write(`  Address   http://${address}:${port}\n`)
-  } else {
-    process.stdout.write(`  Address   http://<this machine's LAN address>:${port}\n`)
-  }
-  process.stdout.write(`  Username  ${username}\n`)
-  process.stdout.write(`  Password  ${password}\n`)
-
-  if (plan.mode === "daemon") {
-    process.stdout.write("\nHarnesses detected on this machine:\n")
-    for (const agent of plan.detected) {
-      if (agent === backend) process.stdout.write(`  • ${agent} — selected as primary\n`)
-      else if (agent === "opencode") process.stdout.write("  • opencode — will be started by the daemon\n")
-      else process.stdout.write(`  • ${agent} — detected, not started\n`)
-    }
-    process.stdout.write("\n")
-  } else {
-    process.stdout.write(`\nBackend: ${backend}\n`)
-  }
+  process.stdout.write(formatStartupSummary({ plan, addresses, port, username, password }))
 
   if (plan.mode === "daemon") {
     const daemonArgs = buildDaemonArgs(args, { backend, host, port, openCode: plan.openCode, openCodePort })
-    process.stdout.write("\nStarting machine daemon...\n")
     const daemonPath = fileURLToPath(new URL("./daemon-cli.js", import.meta.url))
     spawnNodeEntrypoint(daemonPath, daemonArgs, username, password)
     return
   }
 
   if (backend === "opencode") {
-    process.stdout.write("\nStarting managed OpenCode host...\n")
+    process.stdout.write("\nStarting OpenCode...\n")
     const managed = await startManagedOpenCode({ host, port, username, password })
-    process.stdout.write(`OpenCode is ready on ${host}:${port}. Keep this process running while Harness Remote is connected.\n`)
+    process.stdout.write("Harness Remote is ready. Keep this terminal open while you use it.\n")
 
     let shuttingDown = false
     const shutdown = createManagedShutdown(managed)
@@ -367,8 +369,6 @@ async function main() {
   }
 
   const bridgeArgs = buildBridgeArgs(args, { backend, host, port })
-  process.stdout.write("\nStarting existing bridge...\n")
-
   const cliPath = fileURLToPath(new URL("./cli.js", import.meta.url))
   spawnNodeEntrypoint(cliPath, bridgeArgs, username, password)
 }

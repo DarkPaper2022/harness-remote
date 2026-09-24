@@ -2,13 +2,17 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 /*
- * What the model picker and the conversation are told about an OMP Session's model.
+ * What the model picker and the conversation are told about a native Session's model.
  *
  * Two symptoms came from the same gap: OMP reported its model on the transcript page, but the
  * runtime only listened for that on the two backends it was written for. So returning to a
  * working Session showed "Harness default" until something else filled it in, and a turn minted
  * before the answer arrived carried no model at all - which the timeline reads as a model change
  * and announces in the conversation, on the very turn where nothing changed.
+ *
+ * OpenCode reports model identity on native message envelopes rather than page.model. The same
+ * adapter boundary must consume the newest native envelope and surface that verified model into the
+ * already-open runtime without depending on implementation-text guards.
  */
 
 globalThis.window ??= globalThis
@@ -51,8 +55,18 @@ function target(overrides = {}) {
   }
 }
 
-function message(id, role, text) {
-  return { info: { id, role, sessionID: 'omp-1', time: { created: 1 } }, parts: [{ id: `${id}:t`, messageID: id, type: 'text', text }] }
+function message(id, role, text, options = {}) {
+  const { sessionID = 'omp-1', model } = options
+  return {
+    info: {
+      id,
+      role,
+      sessionID,
+      time: { created: 1 },
+      ...(model ? { model } : {})
+    },
+    parts: [{ id: `${id}:t`, messageID: id, type: 'text', text }]
+  }
 }
 
 test('an OMP transcript page carries the Session model into the open runtime', async () => {
@@ -137,6 +151,48 @@ test('continuing a recovered OMP Session announces no model change', async () =>
       timeline.filter((entry) => entry.taskdesk?.kind === 'event').length,
       0,
       'continuing on the same model must announce nothing'
+    )
+  } finally {
+    registration.dispose()
+  }
+})
+
+test('an OpenCode tail page carries the newest native message model into the open runtime', async () => {
+  const updates = []
+  const config = { ...CONFIG, backend: 'opencode', agentId: 'opencode' }
+  const registration = registerNativeSessionV3Adapter(target({
+    key: 'machine:opencode:oc-1',
+    ref: { machineID: 'machine', agentID: 'opencode', sessionID: 'oc-1', directory: '/repo' },
+    agentID: 'opencode',
+    agentLabel: 'OpenCode',
+    backend: 'opencode',
+    sessionID: 'oc-1',
+    requiresExplicitClaim: false,
+    config
+  }), (conversation) => updates.push(conversation))
+
+  try {
+    assert.equal(registration.conversation.model, null, 'OpenCode Session mounts before transcript model enrichment')
+
+    pages.push({
+      messages: [
+        message('oc-old-user', 'user', 'Earlier question', {
+          sessionID: 'oc-1',
+          model: { providerID: 'google', modelID: 'old-model' }
+        }),
+        message('oc-new-assistant', 'assistant', 'Latest answer', {
+          sessionID: 'oc-1',
+          model: { providerID: 'anthropic', id: 'claude-sonnet-4-6', variant: 'high' }
+        })
+      ],
+      hasMore: false
+    })
+    await registration.controller.loadMessagePage(config, 'oc-1', '/repo')
+
+    assert.deepEqual(
+      updates.at(-1).model,
+      { providerID: 'anthropic', modelID: 'claude-sonnet-4-6', variant: 'high' },
+      'the adapter must project the newest OpenCode native message model into the open runtime'
     )
   } finally {
     registration.dispose()

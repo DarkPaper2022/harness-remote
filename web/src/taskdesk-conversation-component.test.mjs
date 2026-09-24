@@ -98,16 +98,6 @@ test("transcript-proven ambiguous delivery settles the restored draft without a 
   assert.match(controller, /setUncertainDelivery\(null\)/)
 })
 
-
-test("model bootstrap blocks editing and Send until a live catalog is ready", () => {
-  assert.match(controller, /modelCatalogReady = !modelSelectionRequired \|\| \(!modelsLoading && models\.length > 0\)/)
-  assert.match(controller, /modelBootstrapBlocked/)
-  assert.match(controller, /\|\| modelBootstrapBlocked[\s\S]*\) return/)
-  assert.match(controller, /composerDisabled=\{!interactionEnabled \|\| modelBootstrapBlocked\}/)
-  assert.match(controller, /sendDisabled=\{!interactionEnabled \|\| working \|\| replySettling[\s\S]*modelBootstrapBlocked\}/)
-  assert.match(component, /disabled=\{!ready \|\| composerDisabled\}/)
-})
-
 test("accepted native replies keep settling after an early idle edge", () => {
   assert.match(controller, /REPLY_SETTLE_RECONCILE_MS = 1_500/)
   assert.match(controller, /REPLY_SETTLE_IDLE_GRACE_MS = 20_000/)

@@ -1,32 +1,32 @@
-name: Verify desktop application menu
+name: Verify desktop runtime and application menu
 
-# The packaging workflow only runs on main and on tags, so a change to the menu would not be
-# exercised on macOS until after it was merged. macOS is the one platform that installs a native
-# menu, and it is the one platform most contributors cannot test on — so this runs there, on the
-# pull request, and does nothing else.
+# Desktop runtime behavior is platform-sensitive: process lifecycle and packaging paths differ across
+# Windows, macOS and Linux, while macOS is also the platform that installs a native application menu.
+# Keep this gate present on every PR that can reach main or the persistent integration branch so a
+# green merge decision never depends on whether a path filter happened to schedule desktop coverage.
 
 "on":
   workflow_dispatch: {}
   pull_request:
-    paths:
-      - 'web/electron/**'
-      - 'web/scripts/menu-smoke.mjs'
-      - 'web/src/App.tsx'
-      - 'web/src/desktopBridge.ts'
-      - 'web/package.json'
-      - '.github/workflows/desktop-menu.yml'
+    branches:
+      - main
+      - codex/development-2026-09-11
 
 permissions:
   contents: read
 
 concurrency:
-  group: desktop-menu-${{ github.ref }}
+  group: desktop-runtime-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  menu:
-    name: Application menu on macOS
-    runs-on: macos-latest
+  desktop:
+    name: Desktop tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -46,8 +46,90 @@ jobs:
         run: npm run test:desktop
         working-directory: web
 
+      # The self-contained desktop claim depends on electron-builder actually copying a runnable
+      # daemon beside the ASAR. Presence checks catch bad relative paths; executing --help through
+      # the packaged Electron binary in Node mode also proves the copied module graph resolves.
+      - name: Verify embedded daemon runs from packaged Windows app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: web
+        run: |
+          npm run package:win:dir
+          $resources = Join-Path $PWD 'release/win-unpacked/resources'
+          $daemon = Join-Path $resources 'bridge-runtime/src/daemon-cli.js'
+          $package = Join-Path $resources 'bridge-runtime/package.json'
+          $electron = Join-Path $PWD 'release/win-unpacked/Harness Remote.exe'
+          if (-not (Test-Path $daemon)) { throw "Packaged desktop is missing embedded daemon: $daemon" }
+          if (-not (Test-Path $package)) { throw "Packaged desktop is missing bridge package metadata: $package" }
+          if (-not (Test-Path $electron)) { throw "Packaged desktop executable is missing: $electron" }
+          $env:ELECTRON_RUN_AS_NODE = '1'
+          try {
+            & $electron $daemon --backend omp --help
+            if ($LASTEXITCODE -ne 0) { throw "Packaged embedded daemon failed module/bootstrap smoke with exit code $LASTEXITCODE" }
+          } finally {
+            Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue
+          }
+
+      # Keep the PR smoke cheap: build an unpacked app for the runner's architecture instead of the
+      # release workflow's DMG/ZIP matrix, then execute the daemon from the exact Resources layout
+      # used by packaged macOS builds. This catches missing extraResources/module-graph regressions
+      # without duplicating release artifact production on every desktop PR.
+      - name: Verify embedded daemon runs from packaged macOS app
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: web
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            arm64) arch_flag=--arm64 ;;
+            x86_64) arch_flag=--x64 ;;
+            *) echo "Unsupported macOS runner architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          npm run build:desktop
+          npx electron-builder --publish never --mac dir "$arch_flag"
+          app_bundle="$(find release -type d -name 'Harness Remote.app' -print -quit)"
+          if [ -z "$app_bundle" ]; then
+            echo "Packaged macOS app bundle was not produced." >&2
+            exit 1
+          fi
+          resources="$app_bundle/Contents/Resources"
+          daemon="$resources/bridge-runtime/src/daemon-cli.js"
+          package="$resources/bridge-runtime/package.json"
+          electron="$app_bundle/Contents/MacOS/Harness Remote"
+          test -f "$daemon" || { echo "Packaged desktop is missing embedded daemon: $daemon" >&2; exit 1; }
+          test -f "$package" || { echo "Packaged desktop is missing bridge package metadata: $package" >&2; exit 1; }
+          test -x "$electron" || { echo "Packaged desktop executable is missing or not executable: $electron" >&2; exit 1; }
+          ELECTRON_RUN_AS_NODE=1 "$electron" "$daemon" --backend omp --help
+
+      # Linux release artifacts are AppImage/deb, but their payload comes from the same unpacked app
+      # tree. Exercise that tree directly so the PR gate proves the embedded runtime is physically
+      # present and executable on the third supported desktop OS without building release archives.
+      - name: Verify embedded daemon runs from packaged Linux app
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: web
+        run: |
+          set -euo pipefail
+          npm run build:desktop
+          npx electron-builder --publish never --linux dir --x64
+          daemon="$(find release -path '*/resources/bridge-runtime/src/daemon-cli.js' -print -quit)"
+          if [ -z "$daemon" ]; then
+            echo "Packaged Linux app is missing the embedded daemon." >&2
+            exit 1
+          fi
+          resources="$(dirname "$(dirname "$(dirname "$daemon")")")"
+          app_root="$(dirname "$resources")"
+          package="$resources/bridge-runtime/package.json"
+          electron="$app_root/Harness Remote"
+          test -f "$package" || { echo "Packaged desktop is missing bridge package metadata: $package" >&2; exit 1; }
+          test -x "$electron" || { echo "Packaged desktop executable is missing or not executable: $electron" >&2; exit 1; }
+          ELECTRON_RUN_AS_NODE=1 "$electron" "$daemon" --backend omp --help
+
       # Boots Electron, installs the real menu and reads it back — the part the unit tests cannot
       # reach, on the platform that actually shows it.
       - name: Verify the application menu installs
+        if: runner.os == 'macOS'
         run: npm run test:desktop:menu
         working-directory: web

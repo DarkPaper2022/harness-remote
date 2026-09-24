@@ -217,4 +217,58 @@ assert.ok(stallStatuses.some((status) => status.type === 'reconnecting'), 'stall
 assert.ok(stallConnects > 1, `stalled stream should redial, got ${stallConnects} connects`)
 stallSubscription.close()
 
+// Browser/OS suspension can freeze the fetch reader and its watchdog timer together. A first-load
+// `pageshow` must be ignored, while a real hidden -> visible transition, persisted BFCache restore or
+// explicit network recovery must invalidate the pre-sleep socket immediately.
+const visibilityTarget = new EventTarget()
+const networkTarget = new EventTarget()
+let visible = true
+let wakeConnects = 0
+const wakeSubscription = createFetchOpenCodeEventSubscription({
+  url: 'http://127.0.0.1:4097/global/event',
+  stallTimeoutMs: 60_000,
+  lifecycle: {
+    visibilityTarget,
+    networkTarget,
+    isVisible: () => visible
+  },
+  fetchFn: async (_url, init = {}) => {
+    wakeConnects += 1
+    const body = new ReadableStream({
+      start(controller) {
+        init.signal?.addEventListener('abort', () => controller.error(Object.assign(new Error('aborted'), { name: 'AbortError' })), { once: true })
+      }
+    })
+    return new Response(body, { headers: { 'content-type': 'text/event-stream' } })
+  },
+  onEvent() {},
+  onStatus() {},
+  logger() {}
+})
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.equal(wakeConnects, 1)
+networkTarget.dispatchEvent(new Event('pageshow'))
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.equal(wakeConnects, 1, 'initial pageshow must not create a duplicate startup stream')
+visible = false
+visibilityTarget.dispatchEvent(new Event('visibilitychange'))
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.equal(wakeConnects, 1, 'backgrounding must not open a replacement stream')
+visible = true
+visibilityTarget.dispatchEvent(new Event('visibilitychange'))
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.equal(wakeConnects, 2, 'foregrounding after a real hidden state must replace the pre-sleep stream')
+const persistedPageShow = new Event('pageshow')
+Object.defineProperty(persistedPageShow, 'persisted', { value: true })
+networkTarget.dispatchEvent(persistedPageShow)
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.equal(wakeConnects, 3, 'persisted BFCache restore must redial immediately')
+networkTarget.dispatchEvent(new Event('online'))
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.equal(wakeConnects, 4, 'network recovery while visible must redial immediately')
+wakeSubscription.close()
+networkTarget.dispatchEvent(new Event('pageshow'))
+await new Promise((resolve) => setTimeout(resolve, 0))
+assert.equal(wakeConnects, 4, 'closed subscriptions must detach lifecycle listeners')
+
 console.log('OpenCode event subscription tests passed')

@@ -46,6 +46,10 @@ jobs:
         run: npm run test:ci:full
         working-directory: web
 
+      - name: Run OpenCode permission transport regression
+        run: node scripts/run-vite-test.mjs src/opencode-permission-api.test.mjs
+        working-directory: web
+
       - name: Run bridge tests
         run: npm test
         working-directory: bridge
@@ -112,10 +116,22 @@ jobs:
       - name: Run native Session transcript and composer smoke
         run: |
           node scripts/native-session-navigation-smoke.mjs
+          node scripts/native-claude-browser-smoke.mjs
+          node scripts/native-session-reconnect-smoke.mjs
           node scripts/native-session-browser-smoke.mjs
           node scripts/native-opencode-browser-smoke.mjs
           node scripts/native-opencode-real-regression-smoke.mjs
+          node scripts/native-opencode-permission-regression-smoke.mjs
+          node scripts/native-opencode-rail-state-smoke.mjs
+          node scripts/native-opencode-retry-error-smoke.mjs
+          node scripts/native-opencode-unmounted-durable-smoke.mjs
+          node scripts/native-opencode-multiturn-stress-smoke.mjs
           node scripts/native-session-model-switch-smoke.mjs
+          node scripts/native-session-outcome-browser-smoke.mjs
+        working-directory: web
+
+      - name: Run cross-machine continuation safety smoke
+        run: node scripts/cross-machine-continuation-browser-smoke.mjs
         working-directory: web
 
       - name: Run complete controls and screenshot smoke
@@ -162,6 +178,10 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v4
+        with:
+          # setup-android@v4 still defaults to the retired `tools` package. We install the exact
+          # platform/build-tools below, so skip that default package set and keep the gate reproducible.
+          packages: ''
 
       - name: Install Android 36 SDK packages
         run: sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"

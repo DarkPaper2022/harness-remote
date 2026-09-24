@@ -22,7 +22,6 @@ export type EventStreamStatus =
   | { type: "closed" }
 
 type EventSourceMessage = { data: string }
-
 type EventSourceLike = {
   onopen: ((event: Event) => unknown) | null
   onmessage: ((event: EventSourceMessage) => unknown) | null
@@ -36,7 +35,7 @@ type ReconnectConfig = {
 }
 
 type TimerID = ReturnType<typeof setTimeout>
-
+type LifecycleEventTarget = Pick<EventTarget, "addEventListener" | "removeEventListener">
 type EventSubscriptionOptions = {
   url: string
   reconnect?: ReconnectConfig
@@ -77,6 +76,12 @@ type FetchEventSubscriptionOptions = {
   fetchFn?: typeof fetch
   /** Abort and reconnect when no bytes arrive for this long. Defaults to 30s (server beats every 10s). */
   stallTimeoutMs?: number
+  /** Test seam; production defaults to document/window lifecycle events when they exist. */
+  lifecycle?: {
+    visibilityTarget?: LifecycleEventTarget
+    networkTarget?: LifecycleEventTarget
+    isVisible?: () => boolean
+  }
   onEvent: (event: Extract<ParsedOpenCodeEvent, { ok: true }>) => void
   onStatus?: (status: EventStreamStatus) => void
   logger?: (message: string) => void
@@ -92,10 +97,17 @@ export function createFetchOpenCodeEventSubscription(options: FetchEventSubscrip
   const fetchFn = options.fetchFn ?? fetch
   const stallTimeoutMs = validDelay(options.stallTimeoutMs, 30_000)
   const logger = options.logger ?? ((message: string) => console.debug(message))
+  const visibilityTarget = options.lifecycle?.visibilityTarget
+    ?? (typeof document !== "undefined" ? document : undefined)
+  const networkTarget = options.lifecycle?.networkTarget
+    ?? (typeof window !== "undefined" ? window : undefined)
+  const isVisible = options.lifecycle?.isVisible
+    ?? (() => typeof document === "undefined" || document.visibilityState === "visible")
   let controller: AbortController | undefined
   let reconnectTimer: TimerID | undefined
   let reconnectDelayMs = initialDelayMs
   let closed = false
+  let observedBackground = false
 
   const publishStatus = (status: EventStreamStatus) => options.onStatus?.(status)
   const scheduleReconnect = () => {
@@ -142,8 +154,6 @@ export function createFetchOpenCodeEventSubscription(options: FetchEventSubscrip
         stallTimer = setTimeout(() => {
           stallTimer = undefined
           logger(`OpenCode SSE stalled for ${stallTimeoutMs}ms, reconnecting`)
-          // Abort frees the socket; cancel guarantees the pending read settles even if the
-          // transport does not propagate the abort signal into the body stream.
           currentController.abort()
           reader.cancel().catch(() => undefined)
         }, stallTimeoutMs)
@@ -178,11 +188,49 @@ export function createFetchOpenCodeEventSubscription(options: FetchEventSubscrip
     if (!closed && controller === currentController) scheduleReconnect()
   }
 
+  // Browser timers and TCP reads can both be frozen while a tab, display, or laptop is suspended.
+  // Waiting for the 30s stall watchdog after foregrounding leaves the Session list looking dead even
+  // though the daemon is already reachable. A real lifecycle wake invalidates the pre-sleep stream
+  // and opens one fresh connection immediately. The first page load also fires `pageshow`, so it must
+  // not be mistaken for a resume: only a prior hidden state or a persisted BFCache restore qualifies.
+  const reconnectAfterWake = () => {
+    if (closed || !isVisible()) return
+    if (reconnectTimer !== undefined) clearTimeout(reconnectTimer)
+    reconnectTimer = undefined
+    reconnectDelayMs = initialDelayMs
+    const staleController = controller
+    controller = undefined
+    staleController?.abort()
+    void connect()
+  }
+  const onVisibilityChange = () => {
+    if (!isVisible()) {
+      observedBackground = true
+      return
+    }
+    if (!observedBackground) return
+    observedBackground = false
+    reconnectAfterWake()
+  }
+  const onPageShow = (event: Event) => {
+    const persisted = Boolean((event as PageTransitionEvent).persisted)
+    if (!persisted && !observedBackground) return
+    observedBackground = false
+    reconnectAfterWake()
+  }
+  const onOnline = () => reconnectAfterWake()
+  visibilityTarget?.addEventListener("visibilitychange", onVisibilityChange)
+  networkTarget?.addEventListener("pageshow", onPageShow)
+  networkTarget?.addEventListener("online", onOnline)
+
   connect().catch(() => undefined)
   return {
     close() {
       if (closed) return
       closed = true
+      visibilityTarget?.removeEventListener("visibilitychange", onVisibilityChange)
+      networkTarget?.removeEventListener("pageshow", onPageShow)
+      networkTarget?.removeEventListener("online", onOnline)
       if (reconnectTimer !== undefined) clearTimeout(reconnectTimer)
       reconnectTimer = undefined
       controller?.abort()
@@ -192,46 +240,68 @@ export function createFetchOpenCodeEventSubscription(options: FetchEventSubscrip
   }
 }
 
+type NativeEventEnvelope = { subscriptionID?: string, data?: string }
+type NativeStatusEnvelope = EventStreamStatus & { subscriptionID?: string }
 type NativeLiveEventsPlugin = {
-  start(options: { url: string; username: string; password: string }): Promise<void>
-  stop(): Promise<void>
-  addListener(eventName: "event", listenerFunc: (event: { data?: string }) => void): Promise<PluginListenerHandle>
-  addListener(eventName: "status", listenerFunc: (status: EventStreamStatus) => void): Promise<PluginListenerHandle>
+  start(options: { subscriptionID: string; url: string; username: string; password: string; backend: string }): Promise<void>
+  stop(options: { subscriptionID: string }): Promise<void>
+  addListener(eventName: "event", listenerFunc: (event: NativeEventEnvelope) => void): Promise<PluginListenerHandle>
+  addListener(eventName: "status", listenerFunc: (status: NativeStatusEnvelope) => void): Promise<PluginListenerHandle>
 }
 
 const NativeLiveEvents = registerPlugin<NativeLiveEventsPlugin>("LiveEvents")
+let nextNativeSubscription = 0
+
+function nativeSubscriptionID(): string {
+  nextNativeSubscription += 1
+  return `live-${Date.now().toString(36)}-${nextNativeSubscription.toString(36)}`
+}
 
 export function isNativeEventTransport(): boolean {
   return Capacitor.getPlatform() === "android"
 }
 
-/** Android WebView cannot reliably keep a fetch ReadableStream open; use a direct native HttpURLConnection SSE client. */
+/**
+ * Android WebView cannot reliably keep a fetch ReadableStream open, so each logical subscription
+ * owns one native socket. The subscription id is echoed by the plugin to prevent Session detail,
+ * Attention and multi-machine streams from consuming or cancelling one another.
+ */
 export function createNativeOpenCodeEventSubscription(options: {
   url: string
   username: string
   password: string
+  backend: string
   onEvent: (event: Extract<ParsedOpenCodeEvent, { ok: true }>) => void
   onStatus?: (status: EventStreamStatus) => void
 }): { close(): void } {
+  const subscriptionID = nativeSubscriptionID()
   let closed = false
   let handles: PluginListenerHandle[] = []
   void (async () => {
     try {
-      const eventHandle = await NativeLiveEvents.addListener("event", ({ data }) => {
-        if (closed || !data) return
+      const eventHandle = await NativeLiveEvents.addListener("event", ({ subscriptionID: owner, data }) => {
+        if (closed || owner !== subscriptionID || !data) return
         const event = parseOpenCodeEvent(data)
         if (event.ok) options.onEvent(event)
         else options.onStatus?.({ type: "parse-error", data })
       })
       const statusHandle = await NativeLiveEvents.addListener("status", (status) => {
-        if (!closed) options.onStatus?.(status)
+        if (closed || status.subscriptionID !== subscriptionID) return
+        const { subscriptionID: _owner, ...eventStatus } = status
+        options.onStatus?.(eventStatus as EventStreamStatus)
       })
       handles = [eventHandle, statusHandle]
       if (closed) {
         await Promise.all(handles.map((handle) => handle.remove()))
         return
       }
-      await NativeLiveEvents.start({ url: options.url, username: options.username, password: options.password })
+      await NativeLiveEvents.start({
+        subscriptionID,
+        url: options.url,
+        username: options.username,
+        password: options.password,
+        backend: options.backend
+      })
     } catch (error) {
       if (!closed) options.onStatus?.({ type: "connection-error", error: errorMessage(error) })
     }
@@ -240,7 +310,7 @@ export function createNativeOpenCodeEventSubscription(options: {
     close() {
       if (closed) return
       closed = true
-      void NativeLiveEvents.stop().catch(() => undefined)
+      void NativeLiveEvents.stop({ subscriptionID }).catch(() => undefined)
       void Promise.all(handles.map((handle) => handle.remove())).catch(() => undefined)
       options.onStatus?.({ type: "closed" })
     }
@@ -255,7 +325,7 @@ export function createOpenCodeEventSubscription(options: EventSubscriptionOption
   const initialDelayMs = validDelay(options.reconnect?.initialDelayMs, 1_000)
   const maxDelayMs = Math.max(initialDelayMs, validDelay(options.reconnect?.maxDelayMs, 30_000))
   const createEventSource: (url: string) => EventSourceLike = options.createEventSource
-    ?? ((url: string) => new EventSource(url) as EventSourceLike)
+    ?? ((url) => new EventSource(url) as EventSourceLike)
   const schedule = options.schedule ?? ((callback, delayMs) => setTimeout(callback, delayMs))
   const cancel = options.cancel ?? ((timerID) => clearTimeout(timerID))
   const logger = options.logger ?? ((message: string) => console.debug(message))
@@ -320,7 +390,6 @@ export function createOpenCodeEventSubscription(options: EventSubscriptionOption
   }
 
   connect()
-
   return {
     close() {
       if (closed) return

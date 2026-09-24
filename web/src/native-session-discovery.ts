@@ -1,5 +1,6 @@
 import { api, type NativeSessionLinkRecord } from "./api"
 import { nativeSessionDisplayTitle } from "./native-session-title"
+import { liveSessionIndexStatus } from "./session-index-live-state"
 import type { BackendKind, MachineAgentHost, MessageEnvelope, ModelSelection, ServerConfig, Session, SessionStatus } from "./types"
 
 export type NativeSessionRecord = {
@@ -193,6 +194,44 @@ export type NativeSessionRecordPage = {
   nextCursor?: string
 }
 
+/**
+ * Session-first discovery fans out across every harness on a machine. A cold ACP adapter can spend
+ * tens of seconds starting (and intentionally has a much larger adapter startup ceiling), but that
+ * must never keep an already-available OpenCode/PI/etc. Session rail on "Loading Sessions".
+ *
+ * This is only an observation budget for one harness index read. It does not abort, close or mutate
+ * the native harness; the in-flight adapter start may still finish normally and the next ordinary
+ * discovery pass can pick it up. Eight seconds matches the existing prompt-side enrichment budget
+ * and is long enough for a local index read while keeping one slow harness from owning global UX.
+ */
+export const NATIVE_SESSION_DISCOVERY_BUDGET_MS = 8_000
+
+export class NativeSessionDiscoveryTimeoutError extends Error {
+  constructor(agentID: string, timeoutMs: number) {
+    super(`Native Session discovery for ${agentID} timed out after ${timeoutMs}ms`)
+    this.name = "NativeSessionDiscoveryTimeoutError"
+  }
+}
+
+async function withinNativeSessionDiscoveryBudget<T>(
+  work: Promise<T>,
+  agentID: string,
+  timeoutMs: number
+): Promise<T> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return work
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new NativeSessionDiscoveryTimeoutError(agentID, timeoutMs)), timeoutMs)
+      })
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
 function nativeSessionRecords(
   agent: MachineAgentHost,
   config: ServerConfig,
@@ -212,36 +251,49 @@ function nativeSessionRecords(
     renameSupported: agent.capabilities?.sessionRename === true,
     deleteSupported: agent.capabilities?.sessionDelete === true,
     session,
-    status: statuses[session.id] ?? session.status
+    // A lifecycle edge can precede convergence of the lightweight status endpoint. Use that fresher
+    // observation only inside its bounded grace period; durable discovery becomes authoritative again
+    // automatically afterwards, so a missed future event cannot pin presentation forever.
+    status: liveSessionIndexStatus(config, session.id) ?? statuses[session.id] ?? session.status
   }))
 }
 
 /**
  * Read exactly one lightweight native Session page. A cursor belongs to the adapter connection and
  * is forwarded untouched; only the initial page may fall back to the stable non-paged endpoint.
+ *
+ * The complete read for one harness is bounded. In particular, a cold ACP startup is allowed to
+ * continue in the daemon, but the federated rail stops waiting for it and can render the other
+ * harnesses. A real unsupported-route error may still use the legacy stable endpoint inside the same
+ * overall budget; a timeout never starts a second fallback request behind the first slow one.
  */
 export async function discoverAgentNativeSessionPage(
   base: ServerConfig,
   agent: MachineAgentHost,
   cursor?: string,
-  client: NativeSessionPageReadApi = api
+  client: NativeSessionPageReadApi = api,
+  timeoutMs = NATIVE_SESSION_DISCOVERY_BUDGET_MS
 ): Promise<NativeSessionRecordPage> {
   if (agent.capabilities?.sessions === false) return { records: [] }
   const config = nativeSessionConfig(base, agent)
+  const startedAt = Date.now()
+  const remaining = () => Math.max(1, timeoutMs - (Date.now() - startedAt))
+  const bounded = <T>(work: Promise<T>) => withinNativeSessionDiscoveryBudget(work, agent.id, remaining())
+
   try {
-    const page = await client.listGlobalSessionPage(config, cursor)
+    const page = await bounded(client.listGlobalSessionPage(config, cursor))
     const statuses = page.sessions.some((session) => !session.status)
-      ? await client.listStatuses(config).catch(() => ({} as Record<string, SessionStatus>))
+      ? await bounded(client.listStatuses(config)).catch(() => ({} as Record<string, SessionStatus>))
       : {}
     return {
       records: nativeSessionRecords(agent, config, page.sessions, statuses),
       ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
     }
   } catch (error) {
-    if (cursor) throw error
-    const sessions = await client.listSessions(config)
+    if (cursor || error instanceof NativeSessionDiscoveryTimeoutError) throw error
+    const sessions = await bounded(client.listSessions(config))
     const statuses = sessions.some((session) => !session.status)
-      ? await client.listStatuses(config).catch(() => ({} as Record<string, SessionStatus>))
+      ? await bounded(client.listStatuses(config)).catch(() => ({} as Record<string, SessionStatus>))
       : {}
     return { records: nativeSessionRecords(agent, config, sessions, statuses) }
   }

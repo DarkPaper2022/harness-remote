@@ -15,7 +15,7 @@ type Props = {
   unavailableHint?: string
 }
 
-type ModelGroup = {
+export type ModelGroup = {
   id: string
   providerID: string
   providerName: string
@@ -48,7 +48,7 @@ function formatPrice(value?: number): string {
   return `$${Math.round(value! * 100) / 100}`
 }
 
-function groupModels(models: ModelOption[]): ModelGroup[] {
+export function groupModels(models: ModelOption[]): ModelGroup[] {
   const groups = new Map<string, ModelOption[]>()
   for (const model of models) {
     const key = `${model.providerID}|${model.modelID}`
@@ -79,6 +79,15 @@ function groupModels(models: ModelOption[]): ModelGroup[] {
     if (leftDefault !== rightDefault) return leftDefault - rightDefault
     return left.providerName.localeCompare(right.providerName) || left.modelName.localeCompare(right.modelName)
   })
+}
+
+export function filterModelGroups(groups: ModelGroup[], query: string, freeOnly = false): ModelGroup[] {
+  const needle = query.trim().toLowerCase()
+  const candidates = freeOnly
+    ? groups.filter((group) => group.options.some((option) => option.isFree === true))
+    : groups
+  if (!needle) return candidates
+  return candidates.filter((group) => `${group.providerName} ${group.providerID} ${group.modelName} ${group.modelID} ${group.description || ""} ${group.variants.map((variant) => variant.variant).join(" ")}`.toLowerCase().includes(needle))
 }
 
 function ModelBadges({ group }: { group: ModelGroup }) {
@@ -112,14 +121,7 @@ export function ModelPicker({ models, value, onChange, disabled = false, loading
   )
   const selected = models.find((model) => modelOptionKey(model) === value)
 
-  const filtered = useMemo(() => {
-    const needle = query.trim().toLowerCase()
-    const candidates = freeOnly
-      ? groups.filter((group) => group.options.some((option) => option.isFree === true))
-      : groups
-    if (!needle) return candidates
-    return candidates.filter((group) => `${group.providerName} ${group.providerID} ${group.modelName} ${group.modelID} ${group.description || ""} ${group.variants.map((variant) => variant.variant).join(" ")}`.toLowerCase().includes(needle))
-  }, [freeOnly, groups, query])
+  const filtered = useMemo(() => filterModelGroups(groups, query, freeOnly), [freeOnly, groups, query])
   const visibleGroups = useMemo(() => filtered.slice(0, MAX_VISIBLE_MODEL_GROUPS), [filtered])
 
   const providers = useMemo(() => {

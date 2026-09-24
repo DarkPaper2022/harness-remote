@@ -16,15 +16,18 @@
  * taskdesk-workspace-navigation.css from taskdesk-mobile-navigation.css. */
 import "./native-session-home.css"
 import "./native-session-home-ux.css"
+import "./native-session-attention-inbox.css"
 import "./model-picker.css"
 import "./taskdesk-conversation.css"
 import "./taskdesk-conversation-fixes.css"
 import "./taskdesk-history-loader.css"
 import "./native-session-observer.css"
+import "./native-session-outcome.css"
 import "./taskdesk-workthreads.css"
 import "./taskdesk-mobile-navigation.css"
 import "./taskdesk-focus-layout.css"
 import "./conversation-control-plane.css"
+import "./machine-manager-health.css"
 
 /* Then main.tsx's list, in main.tsx's order, ending on the ported controls. */
 import "./styles.css"
@@ -44,6 +47,7 @@ import "./conversation-base.css"
 import "./session-first-centering-fix.css"
 import "./session-handoff-routing.css"
 import "./session-history-refresh.css"
+import "./machine-pairing.css"
 import "./beautiful-ui-controls.css"
 
 /** Same list, same order as `main.tsx` - `beautiful-ui-controls.test.mjs` asserts the two match, so

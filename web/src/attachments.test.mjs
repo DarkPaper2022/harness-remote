@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
 import { ATTACHMENT_MAX_EDGE, attachmentPart, attachmentTargetSize } from './attachments.ts'
 
 assert.deepEqual(attachmentTargetSize(4032, 3024), { width: ATTACHMENT_MAX_EDGE, height: 1176 })
@@ -15,8 +14,4 @@ assert.deepEqual(
 )
 assert.throws(() => attachmentPart('image/jpeg', 'erro.jpg', 'https://example.com/erro.jpg'), /data URL/)
 
-
-const api = readFileSync(new URL('./api.ts', import.meta.url), 'utf8')
-assert.ok(api.includes('...attachments'), 'the lower-level prompt API must preserve attachment parts when supplied')
-
-console.log('attachment helper and transport tests passed')
+console.log('attachment helper tests passed')

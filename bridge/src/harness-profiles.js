@@ -77,6 +77,9 @@ export const HARNESS_PROFILES = {
     preferListedTitles: true,
     // Keep the replay tail for the one real session/load used when the bridge takes ownership to prompt.
     replaySettleMs: 250,
+    // PI can acknowledge session/prompt before its final session/update notifications arrive. Keep
+    // that same short drain window around a completed prompt so late reasoning closes as Done.
+    promptSettleMs: 250,
     // Current PI ACP calls this `thinkingLevel`. The aliases are harmless compatibility hints for
     // adapter versions that rename the wire id; a variant is emitted only when that option exists.
     modelVariantConfigIDs: ["thinkingLevel", "thinking_level", "thinking"],

@@ -1,8 +1,11 @@
 import type {
+  DesktopAttentionNotification,
+  DesktopAttentionTarget,
   DesktopCompletionNotification,
   DesktopEvent,
   DesktopEventStatus,
   DesktopEventSubscriptionOptions,
+  DesktopLocalRuntimeState,
   DesktopMenuCommand,
   DesktopMenuTemplate,
   DesktopProfile,
@@ -19,6 +22,8 @@ export type DesktopBridgeAPI = {
   readonly platform: Readonly<{ readonly isDesktop: true; readonly os: string; readonly usesNativeMenu?: boolean }>
   replaceProfiles(profiles: DesktopProfile[], revision: number): Promise<DesktopProfileSyncResult>
   request(profileId: string, request: DesktopRequest): Promise<DesktopRequestResult>
+  getLocalRuntimeState(): Promise<DesktopLocalRuntimeState>
+  retryLocalRuntime(): Promise<DesktopLocalRuntimeState>
   subscribeEvents(
     profileId: string,
     options: DesktopEventSubscriptionOptions,
@@ -27,6 +32,8 @@ export type DesktopBridgeAPI = {
   ): Promise<string>
   unsubscribeEvents(subscriptionId: string): Promise<void>
   notifyCompletion(notification: DesktopCompletionNotification): Promise<void>
+  notifyAttention(notification: DesktopAttentionNotification): Promise<void>
+  onAttentionActivated(callback: (target: DesktopAttentionTarget) => void): () => void
   onMenuCommand(callback: (command: DesktopMenuCommand) => void): () => void
   setApplicationMenu(template: DesktopMenuTemplate): Promise<boolean>
 }
@@ -43,6 +50,7 @@ let synchronization: Promise<DesktopProfileSyncResult> | undefined
 let synchronizationError: Error | undefined
 let nextRevision = 0
 let hasSynchronized = false
+let localRuntime: DesktopLocalRuntimeState | null = null
 
 export type DesktopSubscription = { close(): void }
 
@@ -74,6 +82,23 @@ function sameSnapshot(left: DesktopProfile[], right: DesktopProfile[]): boolean 
   return left.length === right.length && left.every((profile, index) => sameProfile(profile, right[index]))
 }
 
+function sameLocalRuntimeState(left: DesktopLocalRuntimeState | null, right: DesktopLocalRuntimeState): boolean {
+  if (!left || left.status !== right.status) return false
+  if (left.status === "starting" && right.status === "starting") return true
+  if (left.status === "unavailable" && right.status === "unavailable") return left.error === right.error
+  if (left.status !== "ready" || right.status !== "ready") return false
+  return left.machine.profileId === right.machine.profileId
+    && left.machine.host === right.machine.host
+    && left.machine.port === right.machine.port
+    && left.machine.pid === right.machine.pid
+}
+
+function rememberLocalRuntimeState(next: DesktopLocalRuntimeState): DesktopLocalRuntimeState {
+  if (sameLocalRuntimeState(localRuntime, next)) return localRuntime!
+  localRuntime = next
+  return next
+}
+
 export type DesktopProfileSource = {
   id: string
   config: ServerConfig
@@ -81,10 +106,12 @@ export type DesktopProfileSource = {
 
 /**
  * Electron authorizes machine endpoints, not individual harness routes. Keep one stable registry
- * entry per WorkspaceMachine and pass backend/agentId separately with each request/subscription.
+ * entry per persistent WorkspaceMachine and pass backend/agentId separately with each request.
+ * The desktop-owned local runtime never enters this payload: main owns that volatile profile.
  */
 export function toDesktopProfiles(profiles: readonly DesktopProfileSource[]): DesktopProfile[] {
   return profiles.flatMap((profile) => {
+    if (localRuntime?.status === "ready" && profile.id === localRuntime.machine.profileId) return []
     const normalized = normalizeServerConfig({ ...profile.config, backend: "opencode", agentId: undefined })
     if (!normalized) return []
     return [{
@@ -162,6 +189,18 @@ export function isAndroidPlatform(platform: string): boolean {
   return platform === "android"
 }
 
+export async function desktopLocalRuntimeState(): Promise<DesktopLocalRuntimeState | null> {
+  const api = bridge()
+  if (!api) return null
+  return rememberLocalRuntimeState(await api.getLocalRuntimeState())
+}
+
+export async function retryDesktopLocalRuntime(): Promise<DesktopLocalRuntimeState | null> {
+  const api = bridge()
+  if (!api) return null
+  return rememberLocalRuntimeState(await api.retryLocalRuntime())
+}
+
 function desktopMachineIdentity(config: ServerConfig): string | null {
   const normalized = normalizeServerConfig({ ...config, backend: "opencode", agentId: undefined })
   if (!normalized) return null
@@ -173,7 +212,17 @@ function desktopMachineIdentity(config: ServerConfig): string | null {
   ])
 }
 
+function localRuntimeProfileID(config: ServerConfig): string | null {
+  if (localRuntime?.status !== "ready") return null
+  const normalized = normalizeServerConfig({ ...config, backend: "opencode", agentId: undefined })
+  if (!normalized) return null
+  const machine = localRuntime.machine
+  return normalized.host === machine.host && normalized.port === machine.port ? machine.profileId : null
+}
+
 export function desktopProfileID(config: ServerConfig): string | null {
+  const runtimeID = localRuntimeProfileID(config)
+  if (runtimeID) return runtimeID
   const identity = desktopMachineIdentity(config)
   if (!identity) return null
   return acknowledgedProfiles.find((candidate) => desktopMachineIdentity(candidate) === identity)?.id ?? null
@@ -181,6 +230,14 @@ export function desktopProfileID(config: ServerConfig): string | null {
 
 export function notifyDesktopCompletion(notification: DesktopCompletionNotification): void {
   void bridge()?.notifyCompletion(notification).catch(() => undefined)
+}
+
+export function notifyDesktopAttention(notification: DesktopAttentionNotification): void {
+  void bridge()?.notifyAttention(notification).catch(() => undefined)
+}
+
+export function subscribeDesktopAttentionActivation(callback: (target: DesktopAttentionTarget) => void): () => void {
+  return bridge()?.onAttentionActivated(callback) ?? (() => undefined)
 }
 
 export function subscribeDesktopMenuCommands(callback: (command: DesktopMenuCommand) => void): () => void {

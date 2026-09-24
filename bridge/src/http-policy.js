@@ -1,10 +1,30 @@
 import { timingSafeEqual } from "node:crypto"
 
+/**
+ * Browsers serialize an origin without a trailing slash, while copying an origin from the address
+ * bar commonly leaves one behind. Keep CORS matching origin-based but forgive that harmless URL
+ * spelling difference (and surrounding whitespace).
+ */
+export function normalizeCorsOrigin(value) {
+  if (typeof value !== "string") return value
+  const candidate = value.trim()
+  if (!candidate) return candidate
+  try {
+    const url = new URL(candidate)
+    if (url.protocol !== "http:" && url.protocol !== "https:") return candidate
+    if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) return candidate
+    return url.origin
+  } catch {
+    return candidate
+  }
+}
+
 /** Returns the request origin when it is explicitly allowed by --cors. */
 export function allowedOrigin(request, config) {
   const origin = request.headers.origin
   if (!origin || !config.corsOrigins?.length) return undefined
-  return config.corsOrigins.includes(origin) ? origin : undefined
+  const normalizedOrigin = normalizeCorsOrigin(origin)
+  return config.corsOrigins.some((candidate) => normalizeCorsOrigin(candidate) === normalizedOrigin) ? origin : undefined
 }
 
 /**

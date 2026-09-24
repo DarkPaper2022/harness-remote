@@ -205,18 +205,31 @@ async function requestWithHeaders<T>(config: ServerConfig, path: string, options
     return { data: normalizeNativeResponseData(response.data) as T, headers: responseHeaders }
   }
 
+  const controller = new AbortController()
+  const readTimeout = options.readTimeout ?? 30_000
+  let timedOut = false
+  const timer = globalThis.setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, readTimeout)
   let response: Response
   try {
     response = await fetch(target, {
       method,
       headers,
-      body: options.body === undefined ? undefined : JSON.stringify(options.body)
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      signal: controller.signal
     })
   } catch {
     const corsHint = hasCredentials(config)
       ? " In a browser, Basic Auth also needs the bridge started with --cors for this origin."
       : ""
+    if (timedOut) {
+      throw new Error(`Request to ${config.host}:${config.port} timed out after ${Math.ceil(readTimeout / 1000)}s.${corsHint}`)
+    }
     throw new Error(`Cannot reach ${config.host}:${config.port}.${corsHint}`)
+  } finally {
+    globalThis.clearTimeout(timer)
   }
 
   if (!response.ok) {
@@ -518,5 +531,5 @@ export const api = {
       method: "POST",
       body: { reply }
     })
-  },
+  }
 }

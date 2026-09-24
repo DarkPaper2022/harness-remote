@@ -1,186 +1,222 @@
 # Harness Remote quick start
 
-Harness Remote has two parts: a launcher on the machine where your repositories and coding agents
-live, and a client you open from web, desktop or Android. The launcher runs the work; the client
-lets you see and continue the native Sessions it exposes.
+Harness Remote connects your clients to the computers where your repositories, coding-agent CLIs, credentials and native Sessions already live.
 
-## Upgrading from Harness Remote 2.x
+The normal setup is intentionally small:
 
-Harness Remote 3 changes the normal startup contract. HR2 commonly connected the client directly to one OpenCode server or one standalone ACP bridge per harness. HR3 is machine-first: the client expects a Harness **Machine** endpoint and discovers Projects, harnesses and native Sessions through it.
+- **Windows/macOS desktop:** open the app; the local computer is managed automatically.
+- **Android:** start the gateway on the computer you want to control and scan its QR code.
+- **Another remote computer:** run one Harness Remote gateway on that computer.
+- **Web/PWA:** connect to a reachable gateway and allow the browser origin with `--cors`.
 
-- Existing standalone ACP bridge commands such as `npx --yes ./bridge --backend omp|pi|claude|codex ...` are still supported as compatibility paths. They can expose native Sessions, but they do not provide the complete HR3 Project catalog/new-Session workflow.
-- A direct `opencode serve` process from an HR2 setup is not a Harness Machine endpoint and cannot be added under **Machines** in HR3.
-- HR2 saved server profiles are kept in storage for legacy code paths, but they are not automatically converted into HR3 `workspaceMachines`. After upgrading, add the machine again in **Machines → Add machine**.
-- For the full HR3 experience, stop the old per-harness public endpoints and use the launcher or machine daemon described below. Legacy single-backend startup is intended for compatibility, not as the preferred HR3 onboarding path.
+## Windows and macOS: local machine needs no setup
 
-## Start a machine and open the client
+Install and open the Harness Remote desktop app.
 
-Install Node.js 20+ and at least one supported coding-agent CLI on the machine with your code, then
-start Harness Remote:
+For the computer where the desktop app is running, you do **not** need to start `harness-remote`, a bridge or a daemon in a terminal. The desktop app starts and supervises its own local Machine runtime and discovers the supported coding-agent CLIs installed on that computer.
+
+If you want to control an additional computer, run the gateway on that other computer.
+
+## Start a gateway on another machine
+
+Requirements on the computer you want to control:
+
+- Node.js 20+
+- at least one supported coding-agent CLI installed and authenticated
+
+Then run:
 
 ```bash
-npx github:giuliastro/harness-remote \
-  --host 0.0.0.0 \
-  --port 4097 \
-  --username harness \
-  --password "use-a-long-unique-password" \
-  --root "$HOME/Software" \
-  --cors http://localhost:5173
+npx --yes github:giuliastro/harness-remote
 ```
 
 `--root` is an optional extra directory boundary used when choosing Projects. The launcher prints the machine
 address and credentials you will enter in the client. The daemon already derives Projects, and the boundary used for browsing and new Sessions, from the working directories of the Sessions each harness reports, so it is normally unnecessary. Only Sessions active within the last 7 days are listed; change that with `--session-days <n>` (`0` for everything).
 
-To use the web/PWA frontend from a checkout:
+Keep the terminal open while using that machine remotely.
 
-```bash
-cd harness-remote/web
-npm ci
-npm run dev
-```
+The launcher automatically handles the normal setup:
 
-Open the URL Vite prints, normally `http://localhost:5173`, then choose **Machines** > **Add
-machine** and enter the address, port, username and password from the launcher. The `--cors` value
-above permits that browser origin; use the exact origin if you host the frontend elsewhere.
+- detects supported CLIs on `PATH`;
+- chooses the compatible runtime;
+- exposes the detected harnesses through the Machine connection when using the HR3 gateway path;
+- starts managed OpenCode when appropriate;
+- chooses available ports;
+- generates authentication credentials;
+- prints one compact connection summary;
+- prints the short-lived Android pairing QR when using the HR3 Machine gateway path.
 
-Desktop and Android clients use the same machine address and credentials. Open the installed client
-and add the machine there; they do not need browser CORS configuration.
-
-From a local repository checkout, the equivalent launcher command is:
-
-```bash
-npm start -- \
-  --host 0.0.0.0 \
-  --port 4097 \
-  --username harness \
-  --password "use-a-long-unique-password" \
-  --root "$HOME/Software" \
-  --cors http://localhost:5173
-```
-
-When installed as a repository/package binary, the command is `harness-remote`. The root package
-remains private: the GitHub/repository launch path is intentional and does not imply that an npm
-package has been published.
-
-## What the one command does
-
-The launcher inspects `PATH` without executing discovered agent binaries and chooses the least-friction compatible runtime:
-
-- with exactly one supported CLI, it preserves the existing single-backend startup path;
-- with multiple supported CLIs and at least one ACP-backed agent, it starts the machine daemon automatically;
-- the daemon selects one detected ACP backend as its primary host and includes managed OpenCode when OpenCode is installed;
-- `--backend <name>` selects the ACP primary on a multi-agent machine;
-- `--single --backend <name>` explicitly opts out of the daemon and forces the legacy single-backend path;
-- if managed OpenCode is included, the launcher chooses a free loopback port automatically instead of assuming 4096 is unused;
-- credentials are generated automatically and kept out of child-process argv;
-- the LAN address and credentials to enter in the client are printed before startup continues.
-
-The supported CLI names are `omp`, `pi`, `claude`, `codex`, and `opencode`.
-
-For example, on a workstation with Codex, Claude Code and OpenCode installed, the plain command:
-
-```bash
-harness-remote
-```
-
-starts one machine daemon instead of failing and asking you to choose a backend. The launcher reports the CLIs it detected, selects an ACP primary, finds a free loopback port for managed OpenCode, and exposes the machine through one authenticated daemon connection.
-
-The current automatic multi-host shape is deliberately precise:
+Supported CLIs are:
 
 ```text
-Harness daemon :4097
-  ├── one detected ACP primary (Codex / Claude / OMP / PI)
-  └── OpenCode, when installed, as a managed loopback HTTP host
+codex
+claude
+opencode
+omp
+pi
 ```
 
-Other detected ACP CLIs are reported by discovery but are not all instantiated concurrently by this startup slice yet. The daemon API and client are already agent-scoped, so adding more ACP host instances does not require another client transport change.
+You normally do not need to choose one manually.
 
-## Choose the daemon primary or force one backend
+## Android: scan and start
 
-On a multi-agent machine, choose the daemon's ACP primary with:
+With the gateway running on the computer you want to control:
+
+1. Open Harness Remote on Android.
+2. Open **Machines**.
+3. Tap **Scan machine QR code**.
+4. Scan the QR shown in the gateway terminal.
+5. Tap **View sessions**.
+
+That is the preferred mobile onboarding flow.
+
+The QR contains a one-time 256-bit pairing token valid for five minutes. It does **not** contain the long-lived gateway password and can be claimed only once.
+
+If QR pairing is unavailable, **Machines → Add machine** remains available as a fallback using the address and credentials printed by the gateway.
+
+## Add another computer from desktop
+
+The desktop app already manages its own local computer.
+
+To add a different computer:
+
+1. start the gateway on that remote computer;
+2. open **Machines → Add machine** in the desktop app;
+3. enter the address, username and password printed by the remote gateway.
+
+You do not need to expose a separate endpoint for Codex, Claude, OpenCode, OMP and PI. One HR3 Machine gateway exposes the supported harnesses on that computer.
+
+## Optional gateway parameters
+
+The plain command is the recommended starting point:
 
 ```bash
-harness-remote --backend codex --root ~/dev
+npx --yes github:giuliastro/harness-remote
 ```
 
-To deliberately use the old single-agent runtime instead:
+Only add options when you need to override the automatic behavior.
+
+### Limit the Project roots
 
 ```bash
-harness-remote --single --backend codex --root ~/dev
+npx --yes github:giuliastro/harness-remote --root ~/dev
 ```
 
-For loopback-only single-agent use:
+`--root` limits which directories Harness Remote offers for Project selection. It is not an operating-system sandbox for the coding agents themselves.
+
+### Use a fixed port
 
 ```bash
-harness-remote --single --backend omp --host 127.0.0.1
+npx --yes github:giuliastro/harness-remote --port 4900
 ```
 
-For a fixed LAN port and your own credentials:
+Without `--port`, Harness Remote chooses an available port automatically.
+
+### Use your own credentials
 
 ```bash
-harness-remote \
-  --backend claude \
-  --port 4900 \
+npx --yes github:giuliastro/harness-remote \
   --username harness \
   --password 'choose-a-strong-password'
 ```
 
-If OpenCode is present on a multi-agent machine, an existing process already using `127.0.0.1:4096` does not break startup: Harness scans forward for a free managed OpenCode port and passes it to the daemon. You can still choose one explicitly with `--opencode-port`.
+Without these options, the launcher generates credentials automatically.
 
-## OpenCode
+### Allow a browser origin
 
-When OpenCode is the only selected backend, Harness Remote starts `opencode serve` itself, passes credentials through `OPENCODE_SERVER_USERNAME` and `OPENCODE_SERVER_PASSWORD`, verifies the authenticated health endpoint, prints connection details, and supervises the child process until shutdown.
-
-```bash
-harness-remote --backend opencode
-```
-
-When the automatic machine daemon path is selected, OpenCode instead stays on its managed loopback listener and the client reaches it through the daemon's agent-scoped proxy. The phone/web/desktop client therefore does not need direct access to the internal OpenCode port.
-
-## Machine daemon
-
-The daemon can still be started explicitly when you want advanced options:
+For local Vite development:
 
 ```bash
-npm run daemon -- --backend codex --host 127.0.0.1
+npx --yes github:giuliastro/harness-remote --cors http://localhost:5173
 ```
 
-or:
+For the hosted client:
 
 ```bash
-harness-remote-daemon --backend codex --host 127.0.0.1
+npx --yes github:giuliastro/harness-remote --cors https://giuliastro.github.io
 ```
 
-`GET /v1/machine` and `GET /global/machine` expose the shared machine registry and stable machine identity. Host lifecycle is isolated: an unavailable managed host does not make the machine disappear.
+`--cors` is needed only for browser/PWA access from that origin. Desktop and Android do not need it.
 
-Agent-scoped requests share the daemon connection:
+### Choose a compatibility backend manually
+
+Usually unnecessary:
+
+```bash
+npx --yes github:giuliastro/harness-remote --backend codex
+```
+
+On a multi-agent Machine gateway this selects the internal ACP compatibility default; it does not hide the other detected harnesses from the client.
+
+## Web / PWA
+
+From a repository checkout:
+
+```bash
+cd web
+npm ci
+npm run dev
+```
+
+Start the gateway with the exact browser origin allowed:
+
+```bash
+npx --yes github:giuliastro/harness-remote --cors http://localhost:5173
+```
+
+Then open the URL printed by Vite, normally `http://localhost:5173`.
+
+The hosted web client is:
 
 ```text
-/v1/agents/codex/session
-/v1/agents/codex/global/event
-/v1/agents/opencode/session
-/v1/agents/opencode/global/event
+https://giuliastro.github.io/harness-remote/
 ```
 
-The selected primary ACP agent is routed through the normalized bridge API. Managed OpenCode requests are streamed through the daemon to the loopback process; external credentials are authenticated at the daemon boundary and replaced with the managed host credentials for the internal request. Legacy unprefixed routes remain available during migration.
-
-Managed OpenCode binds to `127.0.0.1` by default even when the daemon binds to `0.0.0.0`. Wider exposure is explicit:
+For it, use:
 
 ```bash
-harness-remote-daemon --backend codex --opencode-host 0.0.0.0
+npx --yes github:giuliastro/harness-remote --cors https://giuliastro.github.io
 ```
 
-Useful daemon options:
+The gateway deliberately does not pretend to host the web UI itself; it prints connection information for the client.
+
+## Running from a local checkout
+
+From the repository root, the equivalent launcher is:
 
 ```bash
-harness-remote-daemon --backend claude --opencode-port 4901
-harness-remote-daemon --backend codex --opencode-command /custom/opencode
-harness-remote-daemon --backend codex --opencode-host 127.0.0.2
-harness-remote-daemon --backend omp --no-opencode
+npm install
+npm start
 ```
 
-For non-loopback daemon binding, the existing security rule still applies: username and password are required. The managed OpenCode listener remains loopback-only unless `--opencode-host` is supplied explicitly.
+Optional launcher arguments go after `--`:
 
-## Advanced/manual setup
+```bash
+npm start -- --root ~/dev
+```
 
-The existing backend-specific bridge commands remain supported. Use them when you need custom adapter commands, unusual networking, browser CORS configuration, or other advanced settings documented in `REFERENCE.md`.
+## What the automatic launcher does
+
+The launcher inspects `PATH` without executing the detected coding-agent binaries.
+
+With multiple supported CLIs and an ACP-backed harness available, it starts the HR3 Machine daemon automatically and exposes the detected harnesses through one Machine endpoint. Managed OpenCode stays on a loopback listener behind that gateway.
+
+With a single detected harness, the launcher can preserve the compatible single-backend path. That compatibility behavior is why advanced/manual setups may not show exactly the same startup surface as the normal multi-agent HR3 gateway.
+
+If you explicitly need the legacy single-backend path:
+
+```bash
+npx --yes github:giuliastro/harness-remote --single --backend codex
+```
+
+That is an advanced compatibility option, not the recommended onboarding path.
+
+## Security
+
+Use Harness Remote over a trusted LAN or VPN.
+
+Do **not** expose the gateway directly to the public internet.
+
+Generated credentials protect the gateway boundary, but the coding agents still run with the operating-system permissions of the account that started them.
+
+For backend-specific adapters, direct daemon invocation, legacy bridge commands and deeper troubleshooting, see [REFERENCE.md](../REFERENCE.md).

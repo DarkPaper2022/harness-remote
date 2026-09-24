@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import http from "node:http"
 import { spawn } from "node:child_process"
+import { fileURLToPath } from "node:url"
 import { chromium } from "playwright"
 
 const PREVIEW_PORT = 4176
@@ -20,6 +21,7 @@ const INTERRUPT_REPLY = "OPENCODE-RECOVERED-FINAL-REPLY"
 const TERMINAL_INTERRUPT_PROMPT = "OPENCODE-TERMINAL-INTERRUPTION-PROMPT"
 const TERMINAL_ERROR_PROMPT = "OPENCODE-TERMINAL-PROVIDER-ERROR-PROMPT"
 const TERMINAL_ERROR_MESSAGE = "Error from provider (Console): Upstream request failed: Endpoint is unavailable."
+const SILENT_TURN_ERROR_MESSAGE = "OpenCode ended this request without a response. Check the selected model/provider credentials and try again."
 const LATE_RECOVERY_PROMPT = "OPENCODE-LATE-RECOVERY-PROMPT"
 const LATE_RECOVERY_REPLY = "OPENCODE-LATE-RECOVERY-FINAL-REPLY"
 const CREATE_TITLE = "OpenCode created from Harness Remote"
@@ -27,6 +29,8 @@ const CREATE_PROMPT = "OPENCODE-CREATED-FIRST-PROMPT"
 const CREATE_REPLY = "OPENCODE-CREATED-FIRST-REPLY"
 const REOPEN_PROMPT = "OPENCODE-CREATED-REOPEN-PROMPT"
 const REOPEN_REPLY = "OPENCODE-CREATED-REOPEN-REPLY"
+const LOST_EVENT_PROMPT = "OPENCODE-PERSISTED-WITHOUT-FINAL-EVENT-PROMPT"
+const LOST_EVENT_REPLY = "OPENCODE-PERSISTED-WITHOUT-FINAL-EVENT-REPLY"
 
 function textPart(id, text) {
   return { id, type: "text", text }
@@ -56,6 +60,7 @@ function initialTranscript() {
 let sessionCatalog
 let sessionStatuses
 let statusOmissions
+let statusHangs
 let transcripts
 let modelCatalogReads
 let promptHttpBodies
@@ -77,6 +82,7 @@ function resetFakeState() {
   }]])
   sessionStatuses = new Map([[SESSION_ID, { type: "idle" }]])
   statusOmissions = new Set()
+  statusHangs = new Set()
   transcripts = new Map([[SESSION_ID, initialTranscript()]])
   modelCatalogReads = 0
   promptHttpBodies = []
@@ -104,6 +110,7 @@ function replyFor(prompt) {
   if (prompt === LATE_RECOVERY_PROMPT) return LATE_RECOVERY_REPLY
   if (prompt === CREATE_PROMPT) return CREATE_REPLY
   if (prompt === REOPEN_PROMPT) return REOPEN_REPLY
+  if (prompt === LOST_EVENT_PROMPT) return LOST_EVENT_REPLY
   return `OpenCode reply for ${prompt}`
 }
 
@@ -298,6 +305,7 @@ function startFakeDaemon() {
     }
 
     if (request.method === "GET" && url.pathname === "/v1/agents/opencode/session/status") {
+      if (statusHangs.size > 0) return
       json(response, 200, Object.fromEntries([...sessionCatalog.keys()]
         .filter((sessionID) => !statusOmissions.has(sessionID))
         .map((sessionID) => [
@@ -372,7 +380,7 @@ function startFakeDaemon() {
       if (!ledger.has(ledgerKey)) {
         nativePromptDispatches += 1
         ledger.set(ledgerKey, body)
-        if (body.text === SUCCESS_PROMPT) appendPendingTurn(sessionID, body.text, requestId)
+        if (body.text === SUCCESS_PROMPT || body.text === LOST_EVENT_PROMPT) appendPendingTurn(sessionID, body.text, requestId)
         else if (body.text === TERMINAL_ERROR_PROMPT) appendProviderErrorTurn(sessionID, body.text, requestId)
         else if (body.text === INTERRUPT_PROMPT || body.text === TERMINAL_INTERRUPT_PROMPT || body.text === LATE_RECOVERY_PROMPT) appendInterruptedTurn(sessionID, body.text, requestId)
         else appendTurn(sessionID, body.text, requestId)
@@ -387,6 +395,16 @@ function startFakeDaemon() {
           finishPendingTurn(sessionID, body.text, requestId)
           emitLiveEvent(sessionID)
         }, 3_000)
+        return
+      }
+      if (body.text === LOST_EVENT_PROMPT) {
+        statusHangs.add(sessionID)
+        json(response, 200, { status: "accepted", clientRequestId: requestId })
+        // The native assistant envelope exists immediately, but the final persisted reply arrives
+        // without a trailing live event. Keep /session/status hanging too: the mounted UI must use
+        // the bounded transcript recovery rather than waiting for lifecycle enrichment.
+        emitLiveEvent(sessionID, "message.updated")
+        setTimeout(() => finishPendingTurn(sessionID, body.text, requestId), 3_000)
         return
       }
       if (body.text === INTERRUPT_PROMPT) {
@@ -413,8 +431,9 @@ function startFakeDaemon() {
         json(response, 200, { status: "accepted", clientRequestId: requestId })
         emitLiveEvent(sessionID, "message.updated")
         emitLiveEvent(sessionID, "session.status")
-        // Stay idle long enough for Harness Remote to confirm the interruption, then reproduce a
-        // slower automatic provider retry. The busy edge must retract the banner before final text.
+        // Repeated idle edges can happen before the 15s silent-turn grace expires. They are
+        // enrichment only; a later busy retry must keep the turn live without flashing an error.
+        setTimeout(() => emitLiveEvent(sessionID, "session.status"), 1_100)
         setTimeout(() => {
           sessionStatuses.set(sessionID, { type: "busy" })
           emitLiveEvent(sessionID, "session.status")
@@ -478,8 +497,8 @@ function startFakeDaemon() {
 }
 
 function startPreview() {
-  const command = process.platform === "win32" ? "npm.cmd" : "npm"
-  return spawn(command, ["run", "preview", "--", "--host", "127.0.0.1", "--port", String(PREVIEW_PORT), "--strictPort"], {
+  const viteCLI = fileURLToPath(new URL("../node_modules/vite/bin/vite.js", import.meta.url))
+  return spawn(process.execPath, [viteCLI, "preview", "--host", "127.0.0.1", "--port", String(PREVIEW_PORT), "--strictPort"], {
     stdio: ["ignore", "pipe", "pipe"],
     detached: process.platform !== "win32"
   })
@@ -534,12 +553,17 @@ async function waitFor(predicate, description, timeout = 12_000) {
 }
 
 async function openSession(page, title) {
-  await page.locator('.hr-native-workspace[aria-label="Sessions"]').waitFor({ state: "visible" })
-  await page.getByRole("button", { name: new RegExp(title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).click()
-  await page.locator(".hr-native-session-observer").waitFor({ state: "visible" })
-  await page.locator(".tdw-work-thread-conversation").waitFor({ state: "visible" })
-  await page.locator(".uw-composer-shell").waitFor({ state: "visible" })
-  assert.equal(await page.getByRole("button", { name: "Continue this Session" }).count(), 0, "OpenCode Session open must not require a Continue unlock step")
+  try {
+    await page.locator('.hr-native-home[aria-label="Sessions"]').waitFor({ state: "visible" })
+    await page.getByRole("button", { name: new RegExp(title.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).click()
+    await page.locator(".hr-native-session-observer").waitFor({ state: "visible" })
+    await page.locator(".tdw-work-thread-conversation").waitFor({ state: "visible" })
+    await page.locator(".uw-composer-shell").waitFor({ state: "visible" })
+    assert.equal(await page.getByRole("button", { name: "Continue this Session" }).count(), 0, "OpenCode Session open must not require a Continue unlock step")
+  } catch (error) {
+    console.error("OpenCode smoke page before openSession failure:", await page.locator("body").innerText().catch(() => "<body unavailable>"))
+    throw error
+  }
 }
 
 async function waitForReady(page) {
@@ -570,9 +594,38 @@ async function chooseHighVariant(page) {
   await page.getByRole("button", { name: "high", exact: true }).click()
 }
 
+async function assertPersistedReplyWithoutLiveEvent(page, label) {
+  await waitForReady(page)
+  await sendPrompt(page, LOST_EVENT_PROMPT)
+
+  const pending = page.locator(".uw-message-pending").last()
+  await pending.waitFor({ state: "visible", timeout: 2_000 })
+  assert.equal(
+    await page.getByText(LOST_EVENT_REPLY, { exact: true }).count(),
+    0,
+    `${label}: the persisted reply must not be visible before the delayed transcript update`
+  )
+
+  await page.getByText(LOST_EVENT_REPLY, { exact: true }).waitFor({ state: "visible", timeout: 20_000 })
+  await pending.waitFor({ state: "detached", timeout: 10_000 })
+  await waitForReady(page)
+  assert.equal(
+    await page.locator(".tdw-conversation-state.working").count(),
+    0,
+    `${label}: a persisted OpenCode reply must settle the Session while it remains mounted`
+  )
+  assert.equal(
+    await page.locator(".uw-activity-group.uw-tool-running").count(),
+    0,
+    `${label}: the completed OpenCode reply must not leave an Activity spinning`
+  )
+  assert.equal(await page.getByText(LOST_EVENT_PROMPT, { exact: true }).count(), 1, `${label}: prompt duplicated`)
+  assert.equal(await page.getByText(LOST_EVENT_REPLY, { exact: true }).count(), 1, `${label}: reply duplicated`)
+}
+
 async function assertExistingContract(browser, viewport, mobile) {
   resetFakeState()
-  const context = await browser.newContext({ viewport, isMobile: mobile, hasTouch: mobile, deviceScaleFactor: 1 })
+  const context = await browser.newContext({ viewport, isMobile: mobile, hasTouch: mobile, deviceScaleFactor: 1, locale: "en-US" })
   const page = await context.newPage()
   await seed(page)
   await page.goto(APP_ORIGIN, { waitUntil: "domcontentloaded" })
@@ -656,33 +709,32 @@ async function assertExistingContract(browser, viewport, mobile) {
   assert.equal(await page.getByText("Response interrupted", { exact: true }).count(), 0)
   await waitForReady(page)
 
-  // A slower provider retry can begin after the bounded idle confirmation. In that case the banner
-  // may briefly be correct, but the busy edge must retract it while the agent is working again.
+  // Repeated idle edges are still enrichment while the bounded silent-turn grace is open. A slower
+  // provider retry inside that grace must stay live and must not flash a false terminal banner.
   await sendPrompt(page, LATE_RECOVERY_PROMPT)
   const lateBanner = page.getByText("Response interrupted", { exact: true })
-  await lateBanner.waitFor({ state: "visible", timeout: 12_000 })
-  await lateBanner.waitFor({ state: "detached", timeout: 12_000 })
+  await page.waitForTimeout(2_000)
+  assert.equal(await lateBanner.count(), 0, "late retry inside the silent-turn grace must not flash a terminal interruption")
   assert.equal(
     await page.getByText(LATE_RECOVERY_REPLY, { exact: true }).count(),
     0,
-    "late-recovery interruption must be retracted on busy before final text exists"
+    "late retry should still be working before the durable final text exists"
   )
   await page.getByText(LATE_RECOVERY_REPLY, { exact: true }).waitFor({ state: "visible", timeout: 12_000 })
+  assert.equal(await lateBanner.count(), 0, "late retry recovery must finish without a stale interruption banner")
   await waitForReady(page)
 
-  // The suppression is not blanket error hiding: if OpenCode stays idle and never produces a final
-  // reply, the same no-final transcript must eventually resolve to the real terminal interruption.
+  // A permanently idle no-final turn is a real failure, not a successful Ready state. The exact
+  // failure must become visible after the bounded grace, and the next Send must recover in-place.
   await sendPrompt(page, TERMINAL_INTERRUPT_PROMPT)
-  await page.getByText("Response interrupted", { exact: true }).waitFor({ state: "visible", timeout: 12_000 })
-  assert.equal(
-    await page.getByText("The coding agent stopped before producing a final answer.", { exact: true }).count(),
-    1,
-    "a stable terminal OpenCode interruption must remain visible"
-  )
+  await page.getByText("Turn failed", { exact: true }).waitFor({ state: "visible", timeout: 25_000 })
+  await page.getByText(SILENT_TURN_ERROR_MESSAGE, { exact: true }).waitFor({ state: "visible", timeout: 25_000 })
+  await page.locator(".tdw-conversation-state.attention").waitFor({ state: "attached", timeout: 12_000 })
+  const failedComposer = page.getByRole("textbox", { name: "Message OpenCode" })
+  assert.equal(await failedComposer.isDisabled(), false, "a confirmed no-final failure must leave the composer usable for recovery")
+  assert.equal(await page.getByText("Response interrupted", { exact: true }).count(), 0, "confirmed no-final failure must not masquerade as a successful Ready interruption")
 
-  await waitForReady(page)
   await sendPrompt(page, TERMINAL_ERROR_PROMPT)
-  await page.getByText("Turn failed", { exact: true }).waitFor({ state: "visible", timeout: 12_000 })
   await page.getByText(TERMINAL_ERROR_MESSAGE, { exact: true }).waitFor({ state: "visible", timeout: 12_000 })
   await waitForReady(page)
   assert.equal(
@@ -691,7 +743,23 @@ async function assertExistingContract(browser, viewport, mobile) {
     "a terminal OpenCode provider error must stop Working while the Session remains mounted even when /session/status omits it"
   )
   assert.equal(await page.getByText(TERMINAL_ERROR_PROMPT, { exact: true }).count(), 1)
-  assert.equal(await page.getByText("Turn failed", { exact: true }).count(), 1)
+  assert.equal(
+    await page.getByText("Turn failed", { exact: true }).count(),
+    1,
+    "the current provider error must remain an explicit failed turn"
+  )
+  assert.equal(
+    await page.locator(".uw-message-turn-error").count(),
+    2,
+    "the historical no-final interruption and current provider error must both remain visible"
+  )
+  assert.equal(
+    await page.getByText("Response interrupted", { exact: true }).count(),
+    1,
+    "the prior no-final turn should remain represented after the next Send"
+  )
+
+  if (mobile) await assertPersistedReplyWithoutLiveEvent(page, "existing OpenCode Session")
 
   assert.equal(await page.getByRole("button", { name: "Continue with another agent" }).count(), 0, "handoff UI must stay disabled")
 
@@ -705,7 +773,7 @@ async function assertExistingContract(browser, viewport, mobile) {
 
 async function assertCreateContract(browser, viewport, mobile) {
   resetFakeState()
-  const context = await browser.newContext({ viewport, isMobile: mobile, hasTouch: mobile, deviceScaleFactor: 1 })
+  const context = await browser.newContext({ viewport, isMobile: mobile, hasTouch: mobile, deviceScaleFactor: 1, locale: "en-US" })
   const page = await context.newPage()
   await seed(page)
   await page.goto(APP_ORIGIN, { waitUntil: "domcontentloaded" })
@@ -748,6 +816,11 @@ async function assertCreateContract(browser, viewport, mobile) {
   assert.equal(await page.getByText(REOPEN_PROMPT, { exact: true }).count(), 1)
   assert.equal(await page.getByText(REOPEN_REPLY, { exact: true }).count(), 1)
   assert.equal(claimRequests, 0, "OpenCode must never acquire ACP writer ownership")
+
+  // This is the field failure: a newly created Session receives an empty assistant envelope, then
+  // persists the real reply without a trailing live event while /session/status is unavailable.
+  // The mounted Session must show the reply and stop both its Working state and Activity spinner.
+  await assertPersistedReplyWithoutLiveEvent(page, "newly created OpenCode Session")
 
   await context.close()
 }

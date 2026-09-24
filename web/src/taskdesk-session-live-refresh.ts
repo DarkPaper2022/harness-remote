@@ -24,6 +24,12 @@ function isAttentionEvent(type: string): boolean {
   return type.startsWith("permission.") || type.startsWith("question.")
 }
 
+function isAttentionResolutionEvent(type: string): boolean {
+  return type === "permission.replied"
+    || type === "question.replied"
+    || type === "question.rejected"
+}
+
 /**
  * Drive Session freshness from the existing per-agent event stream without turning every streamed
  * token into a full workspace refresh. Message chunks refresh only the selected transcript tail;
@@ -129,6 +135,10 @@ export function startTaskDeskSessionLiveRefresh({
 
   const subscriptions = targets.map((target) => subscribeTaskDeskLiveEvents({
     config: target.config,
+    // The persistent machine subscription owns the shared rail lifecycle store. This selected-detail
+    // subscription exists only for transcript/detail responsiveness; mounting it while navigating
+    // between Sessions must not reset another Session's live retry/error presentation.
+    trackSessionIndex: false,
     onEvent: (event) => {
       const selected = getSelected()
       const selectedEvent = Boolean(
@@ -156,10 +166,21 @@ export function startTaskDeskSessionLiveRefresh({
         return
       }
 
-      // OpenCode and ACP adapters can expose permission/question lifecycle events with different
-      // suffixes. They all mean the selected conversation detail must be re-read immediately.
+      // A request becoming pending is not a terminal lifecycle edge. In particular OpenCode can emit
+      // permission.asked while the current assistant envelope contains only reasoning/tool activity;
+      // forcing status reconciliation at that point can manufacture a red "Response interrupted"
+      // before the user has even answered. Refresh the card and transcript immediately, but only a
+      // *resolution* event may start the bounded lifecycle reconciliation that recovers a final/error
+      // envelope which OpenCode persists just after Allow/Deny/answer.
       if (isAttentionEvent(event.type)) {
-        if (selectedEvent) throttle("detail", 80, onDetail)
+        if (selectedEvent) {
+          throttle("detail", 80, onDetail)
+          throttle("message", 100, onMessage)
+          if (isAttentionResolutionEvent(event.type)) {
+            throttle("index", 120, onIndex)
+            settleAfterLifecycle()
+          }
+        }
         return
       }
 

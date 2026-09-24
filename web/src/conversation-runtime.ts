@@ -30,6 +30,8 @@ export type ConversationRuntime = {
   initialPrompt: string
   model?: ModelSelection | null
   status: string
+  /** Short-lived harness lifecycle detail, for example OpenCode's current retry reason. */
+  activityDetail?: string | null
   directory: string
   currentTurn: ConversationTurn | null
   turns: ConversationTurn[]

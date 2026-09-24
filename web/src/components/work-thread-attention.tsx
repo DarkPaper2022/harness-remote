@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react"
 import { api } from "../api"
+import { discoverMachine, recordApprovalDecision, type ApprovalDecisionIdentity } from "../machineClient"
+import { classifyNativeSessionAttention } from "../native-session-attention"
 import type { PermissionRequest, QuestionRequest, ServerConfig } from "../types"
 
 type Props = {
@@ -7,21 +9,53 @@ type Props = {
   directory: string
   questions: QuestionRequest[]
   permissions: PermissionRequest[]
+  approvalIdentity?: ApprovalDecisionIdentity
   onResolved: () => Promise<void> | void
 }
 
 type AnswerMap = Record<string, string[]>
 type CustomMap = Record<string, string>
 
+const ATTENTION_RESOLUTION_SETTLE_MS = 900
+
 function answerKey(requestID: string, index: number): string {
   return `${requestID}:${index}`
 }
 
-export function WorkThreadAttention({ config, directory, questions, permissions, onResolved }: Props) {
+function permissionExplanation(request: PermissionRequest): string | undefined {
+  for (const key of ["reason", "description", "message"]) {
+    const value = request.metadata?.[key]
+    if (typeof value === "string" && value.trim()) return value.trim()
+  }
+  return undefined
+}
+
+/**
+ * A native permission/question reply is acknowledged before OpenCode necessarily makes the resumed
+ * turn's final transcript durable. Event delivery normally closes that gap, but OpenCode must not
+ * depend on one `permission.replied`/`question.replied` edge surviving navigation, reconnect or
+ * renderer scheduling. Reconcile immediately for every backend (the pre-existing behavior), then
+ * exactly once more for OpenCode after the same bounded settle window used by the live Session
+ * controller. This is user-action driven, not polling, and leaves ACP resolution semantics unchanged.
+ */
+export async function settleResolvedAttention(
+  onResolved: () => Promise<void> | void,
+  backend: ServerConfig["backend"],
+  delayMs = ATTENTION_RESOLUTION_SETTLE_MS
+): Promise<void> {
+  await onResolved()
+  if (backend !== "opencode") return
+  await new Promise<void>((resolve) => setTimeout(resolve, Math.max(0, delayMs)))
+  await onResolved()
+}
+
+export function WorkThreadAttention({ config, directory, questions, permissions, approvalIdentity, onResolved }: Props) {
   const [answers, setAnswers] = useState<AnswerMap>({})
   const [custom, setCustom] = useState<CustomMap>({})
   const [submitting, setSubmitting] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const attention = classifyNativeSessionAttention({ questions, permissions })
+  const authorizationRequired = attention.kind === "authorization"
 
   useEffect(() => {
     setAnswers({})
@@ -31,12 +65,44 @@ export function WorkThreadAttention({ config, directory, questions, permissions,
 
   if (questions.length === 0 && permissions.length === 0) return null
 
+  async function persistSuccessfulPermissionDecision(request: PermissionRequest, reply: "once" | "always" | "reject") {
+    let identity = approvalIdentity
+    if (identity && request.sessionID !== identity.sessionID) return
+    if (!identity) {
+      // HR3 surfaces already discover this machine, so this is normally an in-memory cache hit. On a
+      // legacy bridge there is no machine identity (and no metadata endpoint), which correctly means
+      // "do not record" rather than manufacturing one from host:port.
+      const machine = await discoverMachine(config)
+      if (!machine) return
+      identity = {
+        machineID: machine.machine.id,
+        agentID: config.agentId || config.backend,
+        sessionID: request.sessionID,
+        directory
+      }
+    }
+    const explanation = permissionExplanation(request)
+    await recordApprovalDecision(config, {
+      ...identity,
+      requestID: request.id,
+      requestedAction: request.permission,
+      boundary: request.patterns,
+      decision: reply,
+      decidedAt: new Date().toISOString(),
+      ...(explanation ? { explanation } : {})
+    })
+  }
+
   async function respondPermission(request: PermissionRequest, reply: "once" | "always" | "reject") {
     setSubmitting(request.id)
     setError(null)
     try {
+      // The native harness is the authorization authority. Only after it confirms this reply do we
+      // emit observational control-plane metadata; metadata failure must never reverse a real allow
+      // or deny that already happened.
       await api.replyPermission(config, request.id, reply, directory)
-      await onResolved()
+      void persistSuccessfulPermissionDecision(request, reply).catch(() => undefined)
+      await settleResolvedAttention(onResolved, config.backend)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -59,7 +125,7 @@ export function WorkThreadAttention({ config, directory, questions, permissions,
     setError(null)
     try {
       await api.replyQuestion(config, request.id, result, directory)
-      await onResolved()
+      await settleResolvedAttention(onResolved, config.backend)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason))
     } finally {
@@ -80,10 +146,18 @@ export function WorkThreadAttention({ config, directory, questions, permissions,
   }
 
   return (
-    <section className="tdw-attention bui-approval" aria-label="Agent needs your input" aria-live="polite">
+    <section
+      className="tdw-attention bui-approval"
+      aria-label={authorizationRequired ? "Authorization required" : "Agent needs your input"}
+      aria-live="polite"
+    >
       <div className="tdw-attention-heading">
-        <span><i className="bui-approval-dot" aria-hidden="true" />Needs your input</span>
-        <strong>The coding agent is waiting for a decision.</strong>
+        <span><i className="bui-approval-dot" aria-hidden="true" />{authorizationRequired ? "Authorization required" : "Needs your input"}</span>
+        <strong>
+          {authorizationRequired
+            ? "The coding agent is blocked until you allow or deny this request."
+            : "The coding agent is waiting for your answer."}
+        </strong>
       </div>
 
       {questions.map((request) => (
@@ -135,13 +209,14 @@ export function WorkThreadAttention({ config, directory, questions, permissions,
 
       {permissions.map((request) => (
         <div className="tdw-attention-card" key={request.id}>
-          <strong>Permission required</strong>
+          <strong>Authorization required</strong>
           <p>{request.permission}</p>
           {request.patterns?.length ? (
             <div className="bui-approval-scopes" aria-label="Requested scope">
               {request.patterns.map((pattern) => <code key={pattern}>{pattern}</code>)}
             </div>
           ) : null}
+          <p>If you do nothing, this request remains blocked.</p>
           <div className="tdw-attention-actions">
             <button type="button" className="tdw-button secondary bui-approval-deny" disabled={submitting === request.id} onClick={() => void respondPermission(request, "reject")}>Deny</button>
             <button type="button" className="tdw-button secondary" disabled={submitting === request.id} onClick={() => void respondPermission(request, "once")}>Allow once</button>

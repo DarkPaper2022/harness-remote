@@ -20,6 +20,62 @@ function stopWindowsProcessTree(processID) {
   // process tree, unlike a port-based kill which could terminate an unrelated OpenCode instance.
   spawnSync("taskkill", ["/pid", String(processID), "/t", "/f"], { stdio: "ignore", windowsHide: true })
 }
+
+function posixProcessTree(processID, listProcesses = spawnSync) {
+  const result = listProcesses("ps", ["-eo", "pid=,ppid="], {
+    encoding: "utf8",
+    windowsHide: true
+  })
+  if (result?.error || result?.status !== 0 || typeof result?.stdout !== "string") return [processID]
+
+  const children = new Map()
+  for (const line of result.stdout.split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(\d+)\s*$/.exec(line)
+    if (!match) continue
+    const pid = Number(match[1])
+    const ppid = Number(match[2])
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue
+    const current = children.get(ppid) ?? []
+    current.push(pid)
+    children.set(ppid, current)
+  }
+
+  // Return descendants before parents. OpenCode's npm/native serve chain has historically left the
+  // innermost server alive when only its launcher receives SIGTERM; snapshotting the tree while the
+  // launcher is still alive preserves those exact descendant PIDs before they can be re-parented.
+  const ordered = []
+  const visited = new Set()
+  const visit = (pid) => {
+    if (visited.has(pid)) return
+    visited.add(pid)
+    for (const child of children.get(pid) ?? []) visit(child)
+    ordered.push(pid)
+  }
+  visit(processID)
+  return ordered
+}
+
+export function stopPosixProcessTree(
+  processID,
+  _requestedSignal = "SIGTERM",
+  { listProcesses = spawnSync, killProcess = (pid, signal) => process.kill(pid, signal) } = {}
+) {
+  // OpenCode `serve` has had multiple upstream lifecycle regressions where SIGTERM is consumed while
+  // an internal server/child remains alive. Harness Remote owns only this exact process tree, so use
+  // SIGKILL on the snapshotted PIDs rather than guessing by port or signalling unrelated processes.
+  // This mirrors Windows' existing `taskkill /T /F` semantics and makes daemon restart deterministic.
+  let signalled = false
+  for (const pid of posixProcessTree(processID, listProcesses)) {
+    try {
+      killProcess(pid, "SIGKILL")
+      signalled = true
+    } catch (error) {
+      if (error?.code !== "ESRCH") throw error
+    }
+  }
+  return signalled
+}
+
 const READINESS_RETRY_MS = 100
 const READINESS_ATTEMPT_MS = 1_000
 
@@ -109,6 +165,8 @@ export class ManagedOpenCodeHost extends EventEmitter {
     spawnProcess = spawn,
     platform = process.platform,
     stopProcessTree = stopWindowsProcessTree,
+    stopPosixTree = stopPosixProcessTree,
+    isolatePosixProcessTree = platform !== "win32" && spawnProcess === spawn,
     readinessHost,
     startTimeoutMs = DEFAULT_START_TIMEOUT_MS,
     waitUntilReady = waitForOpenCodeHealth
@@ -123,12 +181,16 @@ export class ManagedOpenCodeHost extends EventEmitter {
     this.spawnProcess = spawnProcess
     this.platform = platform
     this.stopProcessTree = stopProcessTree
+    this.stopPosixTree = stopPosixTree
+    this.isolatePosixProcessTree = isolatePosixProcessTree
     this.readinessHost = readinessHost ?? (host === "0.0.0.0" ? "127.0.0.1" : host)
     this.startTimeoutMs = startTimeoutMs
     this.waitUntilReady = waitUntilReady
     this.child = undefined
     this.windowsShellChild = false
+    this.posixManagedTree = false
     this.starting = undefined
+    this.closed = false
   }
 
   get processID() {
@@ -141,7 +203,7 @@ export class ManagedOpenCodeHost extends EventEmitter {
       this.eventNames().map((eventName) => [String(eventName), this.listenerCount(eventName)])
     )
     return {
-      state: this.starting ? "starting" : this.processID ? "running" : "stopped",
+      state: this.closed ? "closed" : this.starting ? "starting" : this.processID ? "running" : "stopped",
       processID: this.processID,
       startInFlight: Boolean(this.starting),
       listenerCount: Object.values(listenerCounts).reduce((total, count) => total + count, 0),
@@ -150,6 +212,11 @@ export class ManagedOpenCodeHost extends EventEmitter {
   }
 
   async start() {
+    // `stop()` is the daemon-shutdown boundary. Browser/event traffic can still arrive while the
+    // outer HTTP server drains, but it must never resurrect OpenCode after MachineDaemon.close()
+    // already killed the managed process. A natural crash remains restartable because it never sets
+    // this terminal lifecycle latch.
+    if (this.closed) throw new Error("Managed OpenCode host is closed")
     if (this.child && this.child.exitCode == null && this.child.signalCode == null) return
     if (this.starting) return this.starting
     this.starting = this.#start()
@@ -170,8 +237,11 @@ export class ManagedOpenCodeHost extends EventEmitter {
     const child = this.spawnProcess(invocation.command, invocation.args, {
       // Keep OpenCode stdout quiet so the daemon owns the startup summary. Pipe stderr instead of
       // inheriting it so every upstream warning can be identified as OpenCode by the parent CLI.
+      // POSIX production isolates only this managed tree; shutdown snapshots and kills those exact
+      // descendants, including internal OpenCode server children that may otherwise survive SIGTERM.
       stdio: ["ignore", "ignore", "pipe"],
       windowsHide: true,
+      detached: this.isolatePosixProcessTree,
       env: {
         ...this.environment,
         OPENCODE_SERVER_USERNAME: this.username,
@@ -181,6 +251,7 @@ export class ManagedOpenCodeHost extends EventEmitter {
     this.child = child
     forwardStderrLines(child, (line) => this.emit("stderr", line))
     this.windowsShellChild = this.platform === "win32" && this.spawnProcess === spawn && invocation.command !== this.command
+    this.posixManagedTree = this.isolatePosixProcessTree && Number.isInteger(child.pid)
 
     const exited = new Promise((_, reject) => {
       child.once("error", (error) => reject(error))
@@ -206,7 +277,9 @@ export class ManagedOpenCodeHost extends EventEmitter {
       this.emit("available", { pid: this.processID, host: this.host, port: this.port })
     } catch (error) {
       timeout.cancel()
-      this.stop("SIGTERM")
+      // A failed lazy startup is recoverable. Terminate this attempt without closing the host so a
+      // later authenticated request can retry; only the public stop() method is a terminal shutdown.
+      this.#terminate("SIGTERM")
       throw error
     }
 
@@ -218,19 +291,37 @@ export class ManagedOpenCodeHost extends EventEmitter {
     )))
   }
 
-  stop(signal = "SIGTERM") {
+  #terminate(signal = "SIGTERM") {
     const child = this.child
     if (!child || child.exitCode != null || child.signalCode != null) return false
     if (this.windowsShellChild && Number.isInteger(child.pid)) {
       this.stopProcessTree(child.pid)
       return true
     }
+    if (this.posixManagedTree && Number.isInteger(child.pid)) {
+      try {
+        return this.stopPosixTree(child.pid, signal) !== false
+      } catch {
+        // If process enumeration itself becomes unavailable, retain a precise launcher-only fallback.
+        return child.kill(signal)
+      }
+    }
     return child.kill(signal)
+  }
+
+  stop(signal = "SIGTERM") {
+    // MachineDaemon.close() calls this while its HTTP server can still have live EventSource/model
+    // requests draining. Make that boundary terminal before killing the process so those requests
+    // cannot race through ensureManagedHttpAvailable() and start a replacement OpenCode instance.
+    this.closed = true
+    return this.#terminate(signal)
   }
 
   #handleExit(error) {
     if (!this.child) return
     this.child = undefined
+    this.windowsShellChild = false
+    this.posixManagedTree = false
     this.emit("unavailable", error)
   }
 }

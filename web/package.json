@@ -1,7 +1,7 @@
 {
   "name": "harness-remote-web",
   "private": true,
-  "version": "3.0.5",
+  "version": "3.1.0",
   "description": "Companion app for controlling coding-agent harnesses from phone or desktop",
   "homepage": "https://github.com/giuliastro/harness-remote",
   "author": {
@@ -28,27 +28,30 @@
     "cap:sync:ios": "npx cap sync ios",
     "cap:add:android": "npx cap add android",
     "cap:add:ios": "npx cap add ios",
-    "test:ui": "node src/ui-regression.test.mjs && node --experimental-strip-types src/taskdesk-home.test.mjs && node src/taskdesk-performance.test.mjs && node --experimental-strip-types src/taskdesk-message-paging.test.mjs && node --experimental-strip-types src/coalesced-tail-refresh.test.mjs && node src/taskdesk-live-event-routing.test.mjs && node src/taskdesk-composer-performance.test.mjs && node --experimental-strip-types src/conversation-parts.test.mjs && node src/taskdesk-conversation-component.test.mjs && node --experimental-strip-types src/taskdesk-message-order.test.mjs && node scripts/run-vite-test.mjs src/work-thread-timeline.test.mjs src/work-thread-timeline-late.test.mjs src/opencode-recovery.test.mjs && node src/taskdesk-mobile-navigation.test.mjs && node src/taskdesk-message-error.test.mjs && node src/taskdesk-appearance.test.mjs && npm run test:native-session-home",
-    "test:native-session-home": "node scripts/run-vite-test.mjs src/native-session-home.test.mjs",
+    "test:opencode-reasoning-only": "node scripts/run-vite-test.mjs src/opencode-reasoning-only-adapter.test.mjs",
+    "test:ui": "node src/ui-regression.test.mjs && node --experimental-strip-types src/taskdesk-home.test.mjs && node src/taskdesk-performance.test.mjs && node --experimental-strip-types src/taskdesk-message-paging.test.mjs && node --experimental-strip-types src/coalesced-tail-refresh.test.mjs && node src/taskdesk-live-event-routing.test.mjs && node src/taskdesk-composer-performance.test.mjs && node --experimental-strip-types src/conversation-parts.test.mjs && node src/taskdesk-conversation-component.test.mjs && node --experimental-strip-types src/taskdesk-message-order.test.mjs && node scripts/run-vite-test.mjs src/work-thread-timeline.test.mjs src/work-thread-timeline-late.test.mjs src/opencode-recovery.test.mjs && npm run test:opencode-reasoning-only && node src/taskdesk-mobile-navigation.test.mjs && node src/taskdesk-message-error.test.mjs && node src/taskdesk-appearance.test.mjs && npm run test:native-session-home",
+    "test:native-session-home": "node scripts/run-vite-test.mjs src/native-session-home.test.mjs src/native-session-federation.test.mjs src/native-session-attention-index.test.mjs src/native-session-attention-severity.test.mjs src/native-session-attention-notifications.test.mjs src/native-session-attention-desktop.test.mjs",
     "test:settings": "node src/settings-regression.test.mjs && node src/v3-ux-polish-regression.test.mjs",
-    "test:v3-product-ui": "node --experimental-strip-types --test src/v3-conversation-input-performance.test.mjs src/workspace-runtime-merge.test.mjs src/workspace-machines.test.mjs src/v3-dialog-accessibility.test.mjs src/v3-workspace-navigation.test.mjs src/v3-composer-accessibility.test.mjs src/v3-offline-visibility.test.mjs src/v3-crash-recovery.test.mjs src/v3-terminology.test.mjs src/v3-topbar-layout.test.mjs src/v3-conversation-readability.test.mjs src/beautiful-ui-controls.test.mjs src/v3-mobile-keyboard-polish.test.mjs src/v3-v2-parity.test.mjs src/machine-live-refresh.test.mjs",
-    "test:model": "node src/model-regression.test.mjs",
-    "test:events": "node --experimental-strip-types src/opencode-events.test.mjs",
+    "test:v3-product-ui": "node --experimental-strip-types --test src/v3-conversation-input-performance.test.mjs src/workspace-runtime-merge.test.mjs src/workspace-machines.test.mjs src/v3-dialog-accessibility.test.mjs src/v3-workspace-navigation.test.mjs src/v3-composer-accessibility.test.mjs src/v3-offline-visibility.test.mjs src/v3-crash-recovery.test.mjs src/v3-terminology.test.mjs src/v3-topbar-layout.test.mjs src/v3-conversation-readability.test.mjs src/beautiful-ui-controls.test.mjs src/v3-mobile-keyboard-polish.test.mjs src/v3-v2-parity.test.mjs src/machine-live-refresh.test.mjs src/machine-manager-health.test.mjs",
+    "test:native-session-model-recovery": "node scripts/run-vite-test.mjs src/native-session-model-recovery.test.mjs",
+    "test:native-session-controller": "node src/native-session-observer.test.mjs && node --experimental-strip-types src/native-session-route-capabilities.test.mjs",
+    "test:model": "node src/model-regression.test.mjs && node scripts/run-vite-test.mjs src/api-list-models.test.mjs src/model-picker-order.test.mjs src/native-session-create.test.mjs && npm run test:native-session-model-recovery",
+    "test:events": "node --experimental-strip-types src/opencode-events.test.mjs && node src/native-live-events-multiplex.test.mjs",
     "test:profiles": "node --experimental-strip-types src/server-profiles.test.mjs",
     "test:config": "node --experimental-strip-types src/server-config.test.mjs",
-    "test:attachments": "node --experimental-strip-types src/attachments.test.mjs",
-    "test:machine-payload": "node --experimental-strip-types src/machine-payload.test.mjs",
+    "test:attachments": "node --experimental-strip-types src/attachments.test.mjs && node scripts/run-vite-test.mjs src/attachment-transport.test.mjs",
+    "test:machine-payload": "node --experimental-strip-types src/machine-payload.test.mjs && node scripts/run-vite-test.mjs src/machine-client-discovery.test.mjs",
     "test:platform": "node src/platform-regression.test.mjs",
     "test:completion-audio": "node src/completion-audio-regression.test.mjs",
     "test:completion-timing": "node --experimental-strip-types src/completion-audio-timing.test.mjs",
     "test:native-response": "node --experimental-strip-types src/native-response.test.mjs",
-    "test:desktop": "npm run build:electron && node --test electron/*.test.mjs && node scripts/run-vite-test.mjs src/desktop-workspace-bridge.test.mjs",
+    "test:desktop": "npm run build:electron && node --test --test-concurrency=1 electron/*.test.mjs && node scripts/run-vite-test.mjs src/desktop-workspace-bridge.test.mjs src/workspace-runtime-persistence.test.mjs",
     "test:desktop:menu": "npm run build:electron && electron scripts/menu-smoke.mjs",
-    "test:native-session-model-lifecycle": "node scripts/run-vite-test.mjs src/native-session-model-lifecycle.test.mjs",
+    "test:native-session-model-lifecycle": "node scripts/run-vite-test.mjs src/native-session-model-lifecycle.test.mjs src/native-session-pi-identity.test.mjs",
     "test:ci:baseline": "npm run test:i18n && npm run test:config && npm run test:ui && npm run test:settings && npm run test:model && npm run test:events && npm run test:profiles",
     "test:ci:pages": "npm run test:ci:baseline && npm run test:attachments",
     "test:ci:desktop": "npm run test:i18n && npm run test:config && npm run test:ui && npm run test:settings && npm run test:platform && npm run test:model && npm run test:events && npm run test:profiles && npm run test:desktop",
-    "test:ci:full": "npm run test:i18n && npm run test:config && npm run test:ui && npm run test:settings && npm run test:v3-product-ui && npm run test:model && npm run test:events && npm run test:profiles && npm run test:attachments && npm run test:machine-payload && npm run test:platform && npm run test:completion-audio && npm run test:completion-timing && npm run test:native-response && node src/v3-mobile-regression-fixes.test.mjs && node src/session-first-regression.test.mjs && node scripts/run-vite-test.mjs src/native-session-discovery.test.mjs src/native-session-continuation.test.mjs src/native-session-machine-id-migration.test.mjs src/native-session-handoff-recovery.test.mjs && node scripts/run-vite-test.mjs src/omp-session-multi-turn.test.mjs src/omp-session-model-projection.test.mjs && node src/native-session-observer.test.mjs && npm run test:native-session-model-lifecycle"
+    "test:ci:full": "npm run test:i18n && npm run test:config && npm run test:ui && npm run test:settings && npm run test:v3-product-ui && npm run test:model && npm run test:events && npm run test:profiles && npm run test:attachments && npm run test:machine-payload && npm run test:platform && npm run test:completion-audio && npm run test:completion-timing && npm run test:native-response && node src/v3-mobile-regression-fixes.test.mjs && node src/session-first-regression.test.mjs && node scripts/run-vite-test.mjs src/native-session-discovery.test.mjs src/session-index-live-state.test.mjs src/native-session-continuation.test.mjs src/native-session-machine-id-migration.test.mjs src/native-session-handoff-recovery.test.mjs && node scripts/run-vite-test.mjs src/omp-session-multi-turn.test.mjs src/omp-session-model-projection.test.mjs && node src/native-session-observer.test.mjs && npm run test:native-session-model-lifecycle && npm run test:desktop"
   },
   "build": {
     "appId": "com.harnessremote.desktop",
@@ -65,6 +68,17 @@
       "!node_modules/**/*",
       "!**/*.map",
       "!**/*.test.*"
+    ],
+    "extraResources": [
+      {
+        "from": "../bridge/src",
+        "to": "bridge-runtime/src",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../bridge/package.json",
+        "to": "bridge-runtime/package.json"
+      }
     ],
     "win": {
       "target": [

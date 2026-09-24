@@ -13,6 +13,13 @@ import {
 import { ChatIcon, LoadingIcon, RefreshIcon, ServerIcon, SettingsIcon } from "../Icons"
 import { createTranslator, languageOptions, type LanguageCode } from "../i18n"
 import {
+  availableMachineAgentCount,
+  checkingMachineHealth,
+  offlineMachineHealth,
+  onlineMachineHealth,
+  type MachineManagerHealth
+} from "../machine-manager-health"
+import {
   createBurstLimiter,
   isStreamReconnecting,
   machinePollIntervalMs,
@@ -34,6 +41,7 @@ import type { MachineSnapshot, Session } from "../types"
 import { subscribeTaskDeskLiveEvents } from "../taskdesk-live-events"
 import {
   createWorkspaceMachine,
+  isDesktopLocalMachine,
   type WorkspaceMachine
 } from "../workspaceMachines"
 import { sameMachineConnection } from "../machineConnection"
@@ -49,6 +57,7 @@ import "../taskdesk-workthreads.css"
 import "../taskdesk-mobile-navigation.css"
 import "../taskdesk-focus-layout.css"
 import "../conversation-control-plane.css"
+import "../machine-manager-health.css"
 
 /** The 2.x shell persisted its sidebar width and this one did not, so a large monitor got the same
  *  rail as a laptop. Its own key: the two shells have different rails and different defaults. */
@@ -91,6 +100,10 @@ function loadRailWidth(): number | null {
 type Props = {
   machines: WorkspaceMachine[]
   onPersistMachines: (machines: WorkspaceMachine[]) => void
+  onScanMachinePairing?: () => Promise<void>
+  machinePairingBusy?: boolean
+  machinePairingSuccessRevision?: number
+  machinePairingSuccessMachineName?: string | null
 }
 type NativeMachineRuntime = {
   machine: WorkspaceMachine
@@ -103,12 +116,11 @@ type NativeMachineRuntime = {
 
 type MachineEditorProps = {
   machine: WorkspaceMachine
-  isNew: boolean
   onCancel: () => void
   onSave: (machine: WorkspaceMachine) => void
 }
 
-function MachineEditor({ machine, isNew, onCancel, onSave }: MachineEditorProps) {
+function MachineEditor({ machine, onCancel, onSave }: MachineEditorProps) {
   const t = useTranslator()
   const [name, setName] = useState(machine.name)
   const [host, setHost] = useState(machine.config.host)
@@ -167,49 +179,115 @@ function MachineEditor({ machine, isNew, onCancel, onSave }: MachineEditorProps)
       <div className="uw-machine-editor-actions">
         <button type="button" className="uw-manager-button" onClick={onCancel}>{t("sf.cancel")}</button>
         <button type="button" className="uw-manager-button" disabled={!valid || testing} onClick={() => void testConnection()}>{testing ? t("sf.testing") : t("sf.testConnection")}</button>
-        <button type="button" className="uw-manager-button primary" disabled={!valid} onClick={() => valid && onSave(nextMachine())}>{isNew ? t("sf.addMachineAction") : t("sf.saveMachine")}</button>
+        <button type="button" className="uw-manager-button primary" disabled={!valid} onClick={() => valid && onSave(nextMachine())}>{t("sf.saveMachine")}</button>
       </div>
     </div>
   )
 }
 
-function MachineManager({ machines, onClose, onPersist }: { machines: WorkspaceMachine[]; onClose: () => void; onPersist: (machines: WorkspaceMachine[]) => void }) {
+function MachineManager({
+  machines,
+  onClose,
+  onPersist,
+  onScanPairing,
+  pairingBusy = false,
+  pairingSuccessRevision = 0,
+  pairingSuccessMachineName = null
+}: {
+  machines: WorkspaceMachine[]
+  onClose: () => void
+  onPersist: (machines: WorkspaceMachine[]) => void
+  onScanPairing?: () => Promise<void>
+  pairingBusy?: boolean
+  pairingSuccessRevision?: number
+  pairingSuccessMachineName?: string | null
+}) {
   const t = useTranslator()
-  const [editingID, setEditingID] = useState<string | null>(machines.length === 0 ? "new" : null)
+  // Opening Machines is for inspecting the machines you already have. Creating another one is an
+  // explicit action, so an asynchronously discovered machine can never leave a stale blank editor
+  // open (desktop local runtime, QR pairing, or any future machine source all follow the same rule).
+  const [editingID, setEditingID] = useState<string | null>(null)
   const [confirmRemoveID, setConfirmRemoveID] = useState<string | null>(null)
-  const [snapshots, setSnapshots] = useState<Record<string, MachineSnapshot | null | undefined>>({})
+  const [completionMachineName, setCompletionMachineName] = useState<string | null>(null)
+  const [health, setHealth] = useState<Record<string, MachineManagerHealth<MachineSnapshot> | undefined>>({})
+  const probeRequestIDs = useRef<Record<string, number>>({})
   const dialogRef = useRef<HTMLElement>(null)
-  const draft = useMemo(() => editingID === "new" ? createWorkspaceMachine() : machines.find((machine) => machine.id === editingID) || null, [editingID, machines])
+  const draft = useMemo(() => {
+    if (editingID === "new") return createWorkspaceMachine()
+    const machine = machines.find((candidate) => candidate.id === editingID)
+    return machine && !isDesktopLocalMachine(machine) ? machine : null
+  }, [editingID, machines])
+
+  const probeMachine = useCallback((machine: WorkspaceMachine) => {
+    const requestID = (probeRequestIDs.current[machine.id] || 0) + 1
+    probeRequestIDs.current[machine.id] = requestID
+    setHealth((current) => ({
+      ...current,
+      [machine.id]: checkingMachineHealth(current[machine.id])
+    }))
+    void discoverMachine(machine.config).then(
+      (snapshot) => {
+        if (probeRequestIDs.current[machine.id] !== requestID) return
+        setHealth((current) => ({
+          ...current,
+          [machine.id]: snapshot ? onlineMachineHealth(snapshot) : offlineMachineHealth()
+        }))
+      },
+      (reason: unknown) => {
+        if (probeRequestIDs.current[machine.id] !== requestID) return
+        setHealth((current) => ({
+          ...current,
+          [machine.id]: offlineMachineHealth(reason)
+        }))
+      }
+    )
+  }, [])
 
   useEffect(() => {
-    let cancelled = false
-    setSnapshots({})
-    void Promise.all(machines.map(async (machine) => {
-      try { return [machine.id, await discoverMachine(machine.config)] as const }
-      catch { return [machine.id, null] as const }
-    })).then((entries) => {
-      if (!cancelled) setSnapshots(Object.fromEntries(entries))
-    })
-    return () => { cancelled = true }
-  }, [machines])
+    const configured = new Set(machines.map((machine) => machine.id))
+    setHealth((current) => Object.fromEntries(
+      Object.entries(current).filter(([machineID]) => configured.has(machineID))
+    ))
+    for (const machine of machines) probeMachine(machine)
+    return () => {
+      for (const machine of machines) {
+        probeRequestIDs.current[machine.id] = (probeRequestIDs.current[machine.id] || 0) + 1
+      }
+    }
+  }, [machines, probeMachine])
 
   useDialogDismiss(dialogRef, onClose)
 
+  useEffect(() => {
+    if (pairingSuccessRevision <= 0) return
+    // Pairing is authoritative external creation. If the user opened the manual draft only to
+    // reach the scanner, do not leave that stale form behind after the machine was added.
+    setEditingID(null)
+    setConfirmRemoveID(null)
+    setCompletionMachineName(pairingSuccessMachineName)
+  }, [pairingSuccessRevision, pairingSuccessMachineName])
+
   const save = (machine: WorkspaceMachine) => {
-    if (editingID === "new") onPersist([...machines, machine])
-    else onPersist(machines.map((candidate) => candidate.id === machine.id ? machine : candidate))
+    if (isDesktopLocalMachine(machine)) return
+    if (editingID === "new") {
+      onPersist([...machines, machine])
+      setCompletionMachineName(machine.name)
+    } else {
+      onPersist(machines.map((candidate) => candidate.id === machine.id ? machine : candidate))
+    }
     setEditingID(null)
   }
 
   // window.confirm is a blocking native dialog that the Android WebView renders as a bare,
   // unstyled system alert on top of the app. An inline confirmation stays inside the product.
   const remove = (machine: WorkspaceMachine) => {
+    if (isDesktopLocalMachine(machine)) return
     onPersist(machines.filter((candidate) => candidate.id !== machine.id))
     setConfirmRemoveID(null)
     if (editingID === machine.id) setEditingID(null)
   }
 
-  const availableCount = Object.values(snapshots).reduce((count, snapshot) => count + (snapshot?.agents.filter((agent) => agent.state === "available").length || 0), 0)
+  const availableCount = availableMachineAgentCount(health)
 
   return (
     <div className="uw-manager-backdrop" role="presentation" onMouseDown={onClose}>
@@ -219,19 +297,67 @@ function MachineManager({ machines, onClose, onPersist }: { machines: WorkspaceM
           <button type="button" className="uw-manager-close" onClick={onClose} aria-label={t("sf.close")}>×</button>
         </header>
         <div className="uw-machine-manager-body">
-          {machines.length === 0 && editingID !== "new" ? <div className="uw-machine-manager-empty"><strong>{t("sf.noMachinesConfigured")}</strong><span>{t("sf.noMachinesBody")}</span></div> : null}
+          {completionMachineName ? (
+            <div className="uw-machine-manager-success" role="status" aria-live="polite">
+              <div>
+                <strong>{t("sf.machineAddedTitle", { name: completionMachineName })}</strong>
+                <span>{t("sf.machineAddedBody")}</span>
+              </div>
+              <div className="uw-machine-manager-success-actions">
+                <button type="button" className="uw-manager-button primary" data-machine-view-sessions onClick={onClose}>
+                  {t("sf.viewSessions")}
+                </button>
+                {onScanPairing ? (
+                  <button type="button" className="uw-manager-button" data-machine-pairing-scan disabled={pairingBusy} onClick={() => void onScanPairing()}>
+                    {pairingBusy ? t("sf.openingScanner") : t("sf.scanAnotherMachine")}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+          {machines.length === 0 && editingID !== "new" ? (
+            <div className="uw-machine-manager-empty">
+              <strong>{t("sf.noMachinesConfigured")}</strong>
+              <span>{t("sf.noMachinesBody")}</span>
+              <div className="uw-machine-onboarding-actions">
+                {onScanPairing ? (
+                  <button type="button" className="uw-manager-button primary" data-machine-pairing-scan disabled={pairingBusy} onClick={() => void onScanPairing()}>
+                    {pairingBusy ? t("sf.openingScanner") : t("sf.scanMachineQR")}
+                  </button>
+                ) : null}
+                <button type="button" className="uw-manager-button" onClick={() => { setCompletionMachineName(null); setEditingID("new") }}>{t("sf.addManually")}</button>
+              </div>
+            </div>
+          ) : null}
           {machines.map((machine) => {
-            const snapshot = snapshots[machine.id]
+            const check = health[machine.id]
+            const state = check?.state || "checking"
+            const snapshot = check?.snapshot
+            const error = check?.state === "offline" ? check.error : undefined
+            const runtimeOwned = isDesktopLocalMachine(machine)
             return (
-              <div className="uw-machine-config-card" key={machine.id}>
+              <div className="uw-machine-config-card" data-machine-state={state} data-runtime-owned={runtimeOwned || undefined} key={machine.id}>
                 <div className="uw-machine-config-main">
                   <strong>{snapshot?.machine.name || machine.name}</strong>
+                  {runtimeOwned ? <small className="uw-machine-runtime-owned">Managed by Harness Remote</small> : null}
                   <span>{machine.config.host}:{machine.config.port}</span>
-                  <small>{snapshot === undefined ? t("sf.checkingAgents") : snapshot ? t("sf.agentsDetected", { count: snapshot.agents.length }) : t("sf.machineUnavailable")}</small>
+                  <small className={`uw-machine-connection-state ${state}`} aria-live="polite">
+                    <i aria-hidden="true" />
+                    {state === "checking"
+                      ? t("sf.checkingAgents")
+                      : state === "online"
+                        ? t("sf.agentsDetected", { count: snapshot?.agents.length || 0 })
+                        : t("sf.machineUnavailable")}
+                  </small>
+                  {state === "offline" ? (
+                    <small className="uw-machine-connection-error" role="status">
+                      {error || t("sf.notADaemon")}
+                    </small>
+                  ) : null}
                   {snapshot?.agents.length ? <div className="uw-machine-harness-list">{snapshot.agents.map((agent) => <span className="uw-machine-harness" key={agent.id}><i className={agent.state} aria-hidden="true" /><strong>{agent.label}</strong><small>{machineAgentStateLabel(agent.state)}{agent.processID ? ` · PID ${agent.processID}` : ""}</small></span>)}</div> : null}
                 </div>
                 <div className="uw-machine-config-actions">
-                  {confirmRemoveID === machine.id ? (
+                  {confirmRemoveID === machine.id && !runtimeOwned ? (
                     <>
                       <span className="uw-machine-confirm" role="alert">{t("sf.removeQuestion", { name: machine.name })}</span>
                       <button type="button" className="uw-manager-button" onClick={() => setConfirmRemoveID(null)}>{t("sf.keep")}</button>
@@ -239,17 +365,34 @@ function MachineManager({ machines, onClose, onPersist }: { machines: WorkspaceM
                     </>
                   ) : (
                     <>
-                      <button type="button" className="uw-manager-button" onClick={() => setEditingID(machine.id)}>{t("sf.edit")}</button>
-                      <button type="button" className="uw-manager-button danger" onClick={() => setConfirmRemoveID(machine.id)}>{t("sf.remove")}</button>
+                      {state === "offline" ? <button type="button" className="uw-manager-button" data-machine-retry onClick={() => probeMachine(machine)}>{t("sf.retry")}</button> : null}
+                      {!runtimeOwned ? (
+                        <>
+                          <button type="button" className="uw-manager-button" onClick={() => { setCompletionMachineName(null); setEditingID(machine.id) }}>{t("sf.edit")}</button>
+                          <button type="button" className="uw-manager-button danger" onClick={() => setConfirmRemoveID(machine.id)}>{t("sf.remove")}</button>
+                        </>
+                      ) : null}
                     </>
                   )}
                 </div>
               </div>
             )
           })}
-          {draft ? <MachineEditor key={draft.id} machine={draft} isNew={editingID === "new"} onCancel={() => setEditingID(null)} onSave={save} /> : null}
+          {draft ? <MachineEditor key={draft.id} machine={draft} onCancel={() => setEditingID(null)} onSave={save} /> : null}
         </div>
-        <footer className="uw-machine-manager-footer"><span>{t("sf.managerFooter", { machines: machines.length, agents: availableCount })}</span><button type="button" className="uw-manager-button primary" onClick={() => setEditingID("new")}>+ {t("sf.addMachineAction")}</button></footer>
+        <footer className="uw-machine-manager-footer">
+          <span>{t("sf.managerFooter", { machines: machines.length, agents: availableCount })}</span>
+          {machines.length > 0 ? (
+            <div className="uw-machine-manager-footer-actions">
+              {onScanPairing ? (
+                <button type="button" className="uw-manager-button" data-machine-pairing-scan disabled={pairingBusy} onClick={() => void onScanPairing()}>
+                  {pairingBusy ? t("sf.openingScanner") : t("sf.scanAnotherMachine")}
+                </button>
+              ) : null}
+              <button type="button" className="uw-manager-button primary" onClick={() => { setCompletionMachineName(null); setEditingID("new") }}>+ {t("sf.addMachineAction")}</button>
+            </div>
+          ) : null}
+        </footer>
       </section>
     </div>
   )
@@ -345,6 +488,10 @@ function NativeSessionsWorkspace({
   // return an identical snapshot, so the Session list needs an explicit signal to re-read its
   // Sessions after a rename or delete instead of waiting up to 30s for its own refresh.
   const [listRevision, setListRevision] = useState(0)
+  // Only an explicit user refresh may treat a successful first-page read as authoritative absence.
+  // Automatic lifecycle refreshes keep this token stable so transient omissions cannot make active
+  // Sessions disappear from the rail.
+  const [authoritativeListRevision, setAuthoritativeListRevision] = useState(0)
   // A successful DELETE is authoritative before the next Session-index read completes. Keep that
   // stale rail row as a disabled "Deleting..." tombstone instead of briefly presenting it as usable.
   const [deletingSessionKeys, setDeletingSessionKeys] = useState<Set<string>>(() => new Set())
@@ -366,6 +513,7 @@ function NativeSessionsWorkspace({
     setRefreshOrigin(origin)
     setMachineRefreshPending(true)
     setRevision((value) => value + 1)
+    setAuthoritativeListRevision((value) => value + 1)
     setListRevision((value) => {
       const next = value + 1
       pendingSessionRefreshToken.current = next
@@ -831,6 +979,7 @@ function NativeSessionsWorkspace({
             sources={runtimes}
             onOpen={openSession}
             refreshToken={listRevision}
+            authoritativeRefreshToken={authoritativeListRevision}
             onAttentionCountChange={onAttentionCountChange}
             onDiscoveredChange={setSessionsDiscovered}
             onRefreshComplete={completeSessionRefresh}
@@ -1018,7 +1167,14 @@ function NativeSessionsWorkspace({
   )
 }
 
-export function StandaloneUniversalWorkspace({ machines, onPersistMachines }: Props) {
+export function StandaloneUniversalWorkspace({
+  machines,
+  onPersistMachines,
+  onScanMachinePairing,
+  machinePairingBusy = false,
+  machinePairingSuccessRevision = 0,
+  machinePairingSuccessMachineName = null
+}: Props) {
   const t = useTranslator()
   // With the chat full-screen on a phone the rail is invisible, so a Session asking for input had
   // no way of saying so. The counts already existed per machine and per project; only the badge
@@ -1100,7 +1256,17 @@ export function StandaloneUniversalWorkspace({ machines, onPersistMachines }: Pr
   return (
     <div className="uw-standalone-host">
       <NativeSessionsWorkspace machines={machines} onManageMachines={showMachines} onManageSettings={showSettings} onAttentionCountChange={setAttentionCount} />
-      {managerOpen ? <MachineManager machines={machines} onClose={() => setManagerOpen(false)} onPersist={onPersistMachines} /> : null}
+      {managerOpen ? (
+        <MachineManager
+          machines={machines}
+          onClose={() => setManagerOpen(false)}
+          onPersist={onPersistMachines}
+          onScanPairing={onScanMachinePairing}
+          pairingBusy={machinePairingBusy}
+          pairingSuccessRevision={machinePairingSuccessRevision}
+          pairingSuccessMachineName={machinePairingSuccessMachineName}
+        />
+      ) : null}
       {settingsOpen ? <MobileSettingsPage onClose={() => setSettingsOpen(false)} /> : null}
       <nav className="hr-mobile-nav" aria-label={t("sf.mainNavigation")}>
         <button type="button" className={mobileSection === "sessions" ? "active" : ""} onClick={showSessions} aria-current={mobileSection === "sessions" ? "page" : undefined}><ChatIcon size={20} /><span>{t("nav.sessions")}</span>{attentionCount ? <b className="hr-mobile-nav-badge" aria-label={t("sf.attentionCount", { count: attentionCount })}>{attentionCount > 9 ? "9+" : attentionCount}</b> : null}</button>

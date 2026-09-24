@@ -1,10 +1,13 @@
 import type { ContextBridge, IpcRenderer } from "electron"
 import type {
+  DesktopAttentionNotification,
+  DesktopAttentionTarget,
   DesktopCompletionNotification,
   DesktopEvent,
   DesktopEventMessage,
   DesktopEventStatus,
   DesktopEventSubscriptionOptions,
+  DesktopLocalRuntimeState,
   DesktopMenuCommand,
   DesktopMenuTemplate,
   DesktopProfile,
@@ -19,7 +22,11 @@ const IPC_CHANNELS = Object.freeze({
   request: "desktop:request",
   subscribeEvents: "desktop:events:subscribe",
   unsubscribeEvents: "desktop:events:unsubscribe",
+  getLocalRuntime: "desktop:runtime:local:get",
+  retryLocalRuntime: "desktop:runtime:local:retry",
   notifyCompletion: "desktop:completion:notify",
+  notifyAttention: "desktop:attention:notify",
+  attentionActivated: "desktop:attention:activated",
   event: "desktop:events:event",
   menuCommand: "desktop:menu:command",
   setMenu: "desktop:menu:set"
@@ -32,6 +39,7 @@ type EventCallbacks = {
 
 const callbacks = new Map<string, EventCallbacks>()
 const menuCallbacks = new Set<(command: DesktopMenuCommand) => void>()
+const attentionCallbacks = new Set<(target: DesktopAttentionTarget) => void>()
 ipcRenderer.on(IPC_CHANNELS.event, (_event: Electron.IpcRendererEvent, message: DesktopEventMessage) => {
   if (!message || typeof message.subscriptionId !== "string") return
   const callback = callbacks.get(message.subscriptionId)
@@ -41,6 +49,10 @@ ipcRenderer.on(IPC_CHANNELS.event, (_event: Electron.IpcRendererEvent, message: 
 })
 ipcRenderer.on(IPC_CHANNELS.menuCommand, (_event: Electron.IpcRendererEvent, command: DesktopMenuCommand) => {
   for (const callback of menuCallbacks) callback(command)
+})
+ipcRenderer.on(IPC_CHANNELS.attentionActivated, (_event: Electron.IpcRendererEvent, target: DesktopAttentionTarget) => {
+  if (!target || typeof target.machineID !== "string" || typeof target.agentID !== "string" || typeof target.sessionID !== "string") return
+  for (const callback of attentionCallbacks) callback(target)
 })
 
 const harnessDesktop = Object.freeze({
@@ -53,6 +65,12 @@ const harnessDesktop = Object.freeze({
   },
   request(profileId: string, request: DesktopRequest): Promise<DesktopRequestResult> {
     return ipcRenderer.invoke(IPC_CHANNELS.request, profileId, request)
+  },
+  getLocalRuntimeState(): Promise<DesktopLocalRuntimeState> {
+    return ipcRenderer.invoke(IPC_CHANNELS.getLocalRuntime)
+  },
+  retryLocalRuntime(): Promise<DesktopLocalRuntimeState> {
+    return ipcRenderer.invoke(IPC_CHANNELS.retryLocalRuntime)
   },
   async subscribeEvents(
     profileId: string,
@@ -70,6 +88,13 @@ const harnessDesktop = Object.freeze({
   },
   notifyCompletion(notification: DesktopCompletionNotification): Promise<void> {
     return ipcRenderer.invoke(IPC_CHANNELS.notifyCompletion, notification)
+  },
+  notifyAttention(notification: DesktopAttentionNotification): Promise<void> {
+    return ipcRenderer.invoke(IPC_CHANNELS.notifyAttention, notification)
+  },
+  onAttentionActivated(callback: (target: DesktopAttentionTarget) => void): () => void {
+    attentionCallbacks.add(callback)
+    return () => attentionCallbacks.delete(callback)
   },
   onMenuCommand(callback: (command: DesktopMenuCommand) => void): () => void {
     menuCallbacks.add(callback)

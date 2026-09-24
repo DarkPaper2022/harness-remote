@@ -1,25 +1,28 @@
 {
   "name": "harness-remote",
-  "version": "0.1.0",
-  "private": true,
+  "version": "3.1.0",
   "type": "module",
   "bin": {
-    "harness-remote": "./bridge/src/launcher.js",
-    "harness-remote-daemon": "./bridge/src/daemon-bin.js"
+    "harness-remote": "bridge/src/launcher.js",
+    "harness-remote-daemon": "bridge/src/daemon-bin.js"
   },
   "scripts": {
     "start": "node bridge/src/launcher.js",
     "daemon": "node bridge/src/daemon-cli.js",
-    "test": "npm --prefix bridge test"
+    "test": "npm --prefix bridge test",
+    "pack:check": "npm pack --dry-run"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "qrcode-terminal": "0.12.0"
   },
   "description": "Local-first control plane for native AI coding-agent sessions across Codex CLI, Claude Code, OpenCode, Oh My Pi and PI.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/giuliastro/harness-remote.git"
+    "url": "git+https://github.com/giuliastro/harness-remote.git"
   },
   "homepage": "https://github.com/giuliastro/harness-remote",
   "keywords": [
@@ -37,5 +40,15 @@
     "pi",
     "acp",
     "android"
-  ]
+  ],
+  "files": [
+    "bridge/src",
+    "README.md",
+    "LICENSE",
+    "REFERENCE.md",
+    "docs/QUICK_START.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

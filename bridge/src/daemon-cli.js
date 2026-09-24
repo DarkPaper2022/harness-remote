@@ -3,6 +3,8 @@ import path from "node:path"
 import { AcpClient } from "./acp-client.js"
 import { createHarnessAcpClient } from "./session-acp-client.js"
 import { AcpAgentModelCatalog, HttpAgentModelCatalog } from "./agent-model-catalog.js"
+import { ApprovalDecisionStore } from "./approval-decision-store.js"
+import { createApprovalDecisionServer } from "./approval-decision-server.js"
 import { parseConfig, usage as bridgeUsage } from "./config.js"
 import { acpHarnessCapabilityContract, openCodeCapabilityContract } from "./harness-capability-contract.js"
 import { harnessProfile, resolveAcpLaunch } from "./harness-profiles.js"
@@ -161,7 +163,8 @@ async function main() {
         preserveListedTimestamps: profile.preserveListedTimestamps,
         hiddenSessionIDs: modelCatalog.hiddenSessionIDs,
         reloadOnHistoryRefresh: profile.reloadOnHistoryRefresh,
-        replaySettleMs: profile.replaySettleMs
+        replaySettleMs: profile.replaySettleMs,
+        promptSettleMs: profile.promptSettleMs
       }
     })
     acpHosts.set(profile.id, acp)
@@ -191,8 +194,9 @@ async function main() {
       label: "OpenCode",
       backend: "opencode",
       // These are native OpenCode HTTP primitives, not Session-first inventions. Advertising the
-      // complete mutation subset lets the UI expose the same rename/delete/stop/model controls as
-      // the direct OpenCode surface instead of treating a managed host as read-only.
+      // complete native subset is also what lets the global Attention index stay authoritative:
+      // if permission/question support is omitted here, selecting an OpenCode Session can replace
+      // its blocked list status with the detail runtime state and make an unresolved request vanish.
       capabilities: {
         sessions: true,
         prompt: true,
@@ -200,6 +204,8 @@ async function main() {
         streaming: true,
         models: true,
         commands: true,
+        questions: true,
+        permissions: true,
         sessionRename: true,
         sessionDelete: true
       },
@@ -210,7 +216,7 @@ async function main() {
     })
   }
 
-  const server = createMachineDaemonServer({
+  const machineServer = createMachineDaemonServer({
     daemon,
     config,
     primaryAcp: acp,
@@ -220,9 +226,15 @@ async function main() {
       preserveListedTimestamps: primaryProfile.preserveListedTimestamps,
       hiddenSessionIDs: daemon.hostEntry(primaryProfile.id).modelCatalog.hiddenSessionIDs,
       reloadOnHistoryRefresh: primaryProfile.reloadOnHistoryRefresh,
-      replaySettleMs: primaryProfile.replaySettleMs
+      replaySettleMs: primaryProfile.replaySettleMs,
+      promptSettleMs: primaryProfile.promptSettleMs
     }
   })
+  // Authorization still belongs entirely to the underlying harness. This outer server adds only a
+  // durable, authenticated record of decisions that a client has already seen succeed. Every other
+  // request is delegated untouched to the existing machine stack.
+  const approvalDecisionStore = new ApprovalDecisionStore({ machineID: identity.id, stateDirectory: config.stateDirectory })
+  const server = createApprovalDecisionServer({ innerServer: machineServer, config, store: approvalDecisionStore })
 
   await new Promise((resolve, reject) => {
     const onError = (error) => reject(error)
@@ -234,15 +246,19 @@ async function main() {
   })
 
   const managedResults = await daemon.startManagedHosts()
-  process.stdout.write(`Harness daemon ready at http://${config.host}:${config.port}\n`)
-  process.stdout.write(`Machine: ${identity.name} (${identity.id})\n`)
-  process.stdout.write("Active agents:\n")
-  for (const host of daemon.snapshot().agents) {
-    if (host.id === primaryProfile.id) {
-      process.stdout.write(`  • ${host.label} - primary (${host.transport.toUpperCase()})\n`)
-      continue
+  if (process.env.HARNESS_REMOTE_LAUNCHED_BY_LAUNCHER === "1") {
+    process.stdout.write("\nHarness Remote is ready. Keep this terminal open while you use it.\n")
+  } else {
+    process.stdout.write(`Harness daemon ready at http://${config.host}:${config.port}\n`)
+    process.stdout.write(`Machine: ${identity.name} (${identity.id})\n`)
+    process.stdout.write("Active agents:\n")
+    for (const host of daemon.snapshot().agents) {
+      if (host.id === primaryProfile.id) {
+        process.stdout.write(`  • ${host.label} - primary (${host.transport.toUpperCase()})\n`)
+        continue
+      }
+      process.stdout.write(`  • ${host.label} - managed ${host.transport.toUpperCase()}, ${host.state}\n`)
     }
-    process.stdout.write(`  • ${host.label} - managed ${host.transport.toUpperCase()}, ${host.state}\n`)
   }
   for (const result of managedResults) {
     if (result.status !== "available") process.stderr.write(`[${result.id}] unavailable: ${result.error?.message ?? "startup failed"}\n`)
