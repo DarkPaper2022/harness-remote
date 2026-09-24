@@ -1374,6 +1374,11 @@ export class AcpService {
       ]
     }, 300_000).catch((error) => {
       if (this.#turnGenerations.get(sessionID) === generation) {
+        if (error.message?.includes("session terminated") || error.message?.includes("session_terminated")) {
+          this.#acpOpenSessions.delete(sessionID)
+          this.#loaded.delete(sessionID)
+          this.#ownedSessions.delete(sessionID)
+        }
         this.#recordTurnFailure(sessionID, error.message)
         this.#emit("session.error", sessionID, { message: error.message })
       }
@@ -1874,6 +1879,13 @@ export class AcpService {
   async #openWithoutReplay(sessionID, session) {
     if (!this.#journalSeedsOwnedTranscript() && !this.#historyLoader?.authoritativeHistory) return false
     if (!this.#acp.sessionCapabilities?.resume) return false
+    if (this.#acpOpenSessions.has(sessionID)) {
+      this.#loaded.add(sessionID)
+      if (this.#historyLoader?.claimOnLoad) this.#ownedSessions.add(sessionID)
+      this.#settleActivity(sessionID, { emit: false, historical: true })
+      this.#persistSnapshot(sessionID)
+      return true
+    }
     const result = await this.#acp.request(
       "session/resume",
       { sessionId: sessionID, cwd: session.cwd, mcpServers: [] },

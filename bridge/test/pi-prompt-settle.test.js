@@ -79,3 +79,41 @@ test("PI with authoritative journal and resume capability resumes instead of rep
   const messages = await service.messages("pi-resume-session")
   assert.equal(messages[0].parts[0].text, "Hello", "preserves history from authoritative loader")
 })
+
+test("PI open session does not double-resume when commands or prompts run", async () => {
+  const calls = []
+  class PiActiveAcp extends EventEmitter {
+    processID = 1234
+    sessionCapabilities = { resume: true }
+    promptCapabilities = {}
+    async start() {}
+    async request(method, params) {
+      calls.push({ method, params })
+      if (method === "session/new") return { sessionId: "new-pi-session", configOptions: [] }
+      if (method === "session/resume") return { configOptions: [] }
+      if (method === "session/prompt") return {}
+      throw new Error(`Unexpected request: ${method}`)
+    }
+  }
+
+  const historyLoader = async () => []
+  historyLoader.authoritativeHistory = true
+  historyLoader.claimOnLoad = true
+
+  const service = new AcpService(new PiActiveAcp(), { historyLoader })
+  const created = await service.createSession({ directory: "/test", title: "New" })
+  assert.equal(created.id, "new-pi-session")
+
+  const cmds = await service.commands("new-pi-session")
+  assert.deepEqual(cmds, [])
+
+  // session/new already opened the session, so commands must not call session/resume
+  assert.equal(calls.filter((c) => c.method === "session/resume").length, 0)
+  assert.equal(calls.filter((c) => c.method === "session/load").length, 0)
+
+  // Subsequent prompt runs directly
+  await service.prompt("new-pi-session", "Test prompt")
+  assert.equal(calls.filter((c) => c.method === "session/resume").length, 0)
+  assert.equal(calls.filter((c) => c.method === "session/prompt").length, 1)
+})
+
