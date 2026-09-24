@@ -48,3 +48,34 @@ test("PI prompt drain closes late reasoning after session/prompt resolves", asyn
   assert.ok(reasoning?.time?.end, "late PI reasoning was closed after the prompt drain")
   assert.deepEqual(service.status(SESSION), { type: "idle" })
 })
+
+test("PI with authoritative journal and resume capability resumes instead of replaying", async () => {
+  const calls = []
+  class PiResumeAcp extends EventEmitter {
+    sessionCapabilities = { resume: {} }
+    async start() {}
+    async listSessions() {
+      return [{ sessionId: "pi-resume-session", cwd: process.cwd(), title: "PI resume", updatedAt: new Date().toISOString() }]
+    }
+    async request(method, params) {
+      calls.push({ method, params })
+      if (method === "session/resume") return { configOptions: [{ id: "model", currentValue: "zjupl/deepseek-v4-pro" }] }
+      if (method === "session/prompt") return {}
+      throw new Error(`Unexpected request: ${method}`)
+    }
+  }
+
+  const historyLoader = async () => [
+    { info: { id: "m1", role: "user", sessionID: "pi-resume-session", time: { created: 1000 } }, parts: [{ type: "text", text: "Hello" }] }
+  ]
+  historyLoader.authoritativeHistory = true
+  historyLoader.claimOnLoad = true
+
+  const service = new AcpService(new PiResumeAcp(), { historyLoader })
+  await service.prompt("pi-resume-session", "Next prompt")
+
+  assert.ok(calls.some((c) => c.method === "session/resume"), "must call session/resume")
+  assert.ok(!calls.some((c) => c.method === "session/load"), "must NOT call session/load")
+  const messages = await service.messages("pi-resume-session")
+  assert.equal(messages[0].parts[0].text, "Hello", "preserves history from authoritative loader")
+})

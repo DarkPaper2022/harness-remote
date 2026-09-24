@@ -1864,7 +1864,7 @@ export class AcpService {
    * advertised it, so an older build of the same harness still opens through `session/load`.
    */
   async #openWithoutReplay(sessionID, session) {
-    if (!this.#journalSeedsOwnedTranscript()) return false
+    if (!this.#journalSeedsOwnedTranscript() && !this.#historyLoader?.authoritativeHistory) return false
     if (!this.#acp.sessionCapabilities?.resume) return false
     const result = await this.#acp.request(
       "session/resume",
@@ -1872,7 +1872,9 @@ export class AcpService {
       300_000
     )
     this.#acpOpenSessions.add(sessionID)
+    if (this.#historyLoader?.claimOnLoad) this.#ownedSessions.add(sessionID)
     this.#rememberConfigOptions(sessionID, result?.configOptions)
+    this.#settleActivity(sessionID, { emit: false, historical: true })
     this.#loaded.add(sessionID)
     this.#persistSnapshot(sessionID)
     return true

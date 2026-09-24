@@ -359,7 +359,8 @@ export class TaskLauncher {
       await entry.host.start()
       let configOptions
       try {
-        const loaded = await entry.host.request("session/load", {
+        const method = entry.host.sessionCapabilities?.resume ? "session/resume" : "session/load"
+        const loaded = await entry.host.request(method, {
           sessionId: previousRun.sessionId,
           cwd: task.workspace.path,
           mcpServers: []
