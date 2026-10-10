@@ -2394,6 +2394,10 @@ test("the default recent-activity window hides dormant Sessions and a request ca
     assert.deepEqual((await readJSON(bridge.baseURL, "/experimental/session?all=1")).map((session) => session.id), ["fresh", "stale"])
     assert.deepEqual((await readJSON(bridge.baseURL, "/experimental/session?days=90")).map((session) => session.id), ["fresh", "stale"])
     assert.deepEqual((await readJSON(bridge.baseURL, "/experimental/session?days=0")).map((session) => session.id), ["fresh", "stale"])
+    assert.deepEqual((await readJSON(bridge.baseURL, "/experimental/session?q=stale")).map((session) => session.id), ["stale"], "searching with q searches all sessions across history")
+    assert.deepEqual((await readJSON(bridge.baseURL, "/experimental/session?q=fresh")).map((session) => session.id), ["fresh"], "searching with q matches titles")
+    assert.deepEqual((await readJSON(bridge.baseURL, "/experimental/session?q=missing")).map((session) => session.id), [], "search with no matches returns empty list")
+    assert.deepEqual((await readJSON(bridge.baseURL, "/experimental/session?q=stale&days=7")).map((session) => session.id), [], "explicit window restricts search when requested")
     assert.deepEqual(Object.keys(await readJSON(bridge.baseURL, "/session/status")), ["fresh"], "status must respect the same window")
 
     const invalid = await fetch(`${bridge.baseURL}/experimental/session?days=soon`, { headers: authHeaders() })

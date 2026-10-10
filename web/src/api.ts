@@ -295,8 +295,12 @@ export const api = {
     return request<Session[]>(config, withDirectory("/session", directory))
   },
 
-  async listGlobalSessionPage(config: ServerConfig, cursor?: string): Promise<SessionPage> {
-    const path = cursor ? `/experimental/session?cursor=${encodeURIComponent(cursor)}` : "/experimental/session"
+  async listGlobalSessionPage(config: ServerConfig, cursor?: string, query?: string): Promise<SessionPage> {
+    const params = new URLSearchParams()
+    if (cursor) params.set("cursor", cursor)
+    if (query && query.trim()) params.set("q", query.trim())
+    const qs = params.toString()
+    const path = qs ? `/experimental/session?${qs}` : "/experimental/session"
     const response = await requestWithHeaders<Session[]>(config, path)
     return {
       sessions: response.data,

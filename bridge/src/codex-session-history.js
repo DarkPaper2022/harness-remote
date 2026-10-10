@@ -249,7 +249,7 @@ function decodeCodexListCursor(cursor) {
   return Number.isSafeInteger(value) && value > 0 ? value : undefined
 }
 
-async function listCodexThreads({ codexHome, cursor, sinceMs, limit = CODEX_LIST_PAGE_LIMIT }) {
+async function listCodexThreads({ codexHome, cursor, sinceMs, query, limit = CODEX_LIST_PAGE_LIMIT }) {
   const database = await codexStateDatabase(codexHome)
   if (!database) return undefined
   const { file, columns } = database
@@ -281,6 +281,11 @@ async function listCodexThreads({ codexHome, cursor, sinceMs, limit = CODEX_LIST
     if (modelProvider) {
       conditions.push("model_provider = ?")
       parameters.push(modelProvider)
+    }
+    if (typeof query === "string" && query.trim()) {
+      const pattern = `%${query.trim()}%`
+      conditions.push(`(${titleExpression} LIKE ? OR cwd LIKE ? OR id LIKE ?)`)
+      parameters.push(pattern, pattern, pattern)
     }
     if (beforeCreatedAt !== undefined) {
       conditions.push("created_at_ms < ?")

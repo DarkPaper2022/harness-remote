@@ -244,13 +244,21 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
     if (status?.type === "busy" && corroborated.type === "idle") service.settleReportedIdleActivity(sessionID)
     return corroborated
   }
-  const listVisibleSessions = async (directory) => {
+  const listVisibleSessions = async (directory, query = "") => {
     let sessions = await service.listSessions(directory)
     if (backend === "claude") {
       sessions = sessions.map((session) => ({
         ...session,
         status: publicSessionStatus(session.id, session.time?.updated)
       }))
+    }
+    if (query) {
+      const lower = query.toLowerCase()
+      sessions = sessions.filter((s) =>
+        (typeof s.title === "string" && s.title.toLowerCase().includes(lower)) ||
+        (typeof s.id === "string" && s.id.toLowerCase().includes(lower)) ||
+        (typeof s.directory === "string" && s.directory.toLowerCase().includes(lower))
+      )
     }
     if (!hiddenSessionIDs?.size) return sessions
     return sessions.filter((session) => !hiddenSessionIDs.has(session.id))
@@ -260,8 +268,8 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
   // the startup screen is still settling. The cache stores the raw harness page so late filtering
   // (window, hidden, deleted, ownership) still happens per request and cannot go stale.
   const nativePageCache = new Map()
-  const loadNativePage = (cursor, sinceMs) => {
-    const key = `${cursor ?? ""}\u0000${sinceMs ?? ""}`
+  const loadNativePage = (cursor, sinceMs, query = "") => {
+    const key = `${cursor ?? ""}\u0000${sinceMs ?? ""}\u0000${query ?? ""}`
     const entry = nativePageCache.get(key)
     const now = Date.now()
     if (entry?.value && now - entry.at < cacheTtlMs) return Promise.resolve(entry.value)
@@ -270,7 +278,7 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
       // The Codex state database can answer the listing without paying for `thread/list`, which
       // materialises every preview. `undefined` means the fast path is unavailable, not empty.
       const fast = typeof historyLoader?.listSessions === "function"
-        ? await historyLoader.listSessions({ cursor, sinceMs: sinceMs || undefined })
+        ? await historyLoader.listSessions({ cursor, sinceMs: sinceMs || undefined, query: query || undefined })
         : undefined
       const page = fast ?? (typeof acp.listSessionPage === "function"
         ? await acp.listSessionPage(cursor)
@@ -307,19 +315,27 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
   // Live activity is tracked separately so an active Session still sorts to the top without reading
   // its transcript. Invalid or missing harness timestamps stay at zero instead of pretending to be
   // freshly updated on every poll.
-  const listVisibleSessionMetadata = async (directory, cursor, windowMs = defaultWindowMs) => {
+  const listVisibleSessionMetadata = async (directory, cursor, windowMs = defaultWindowMs, query = "") => {
     const cutoff = Number.isFinite(windowMs) && windowMs > 0 ? Date.now() - windowMs : 0
     const [page, deletedSessionIDs] = await Promise.all([
-      loadNativePage(cursor, cutoff),
+      loadNativePage(cursor, cutoff, query),
       service.deletedSessionIDs()
     ])
     await recoverMissingUpdatedAt(page.sessions)
     service.rememberListedSessions(page.sessions)
+    const lowerQuery = query ? query.toLowerCase() : ""
+    const matchesQuery = (title, id, cwd) => {
+      if (!lowerQuery) return true
+      return (typeof title === "string" && title.toLowerCase().includes(lowerQuery)) ||
+             (typeof id === "string" && id.toLowerCase().includes(lowerQuery)) ||
+             (typeof cwd === "string" && cwd.toLowerCase().includes(lowerQuery))
+    }
     const visible = new Map(
       page.sessions
         .filter((session) => !directory || sameListedDirectory(session.cwd, directory))
         .filter((session) => !hiddenSessionIDs?.has(session.sessionId))
         .filter((session) => !deletedSessionIDs.has(session.sessionId))
+        .filter((session) => matchesQuery(session.title, session.sessionId, session.cwd))
         .map((session) => {
           const liveUpdatedAt = liveSessionActivity.get(session.sessionId) ?? 0
           const listedUpdated = Date.parse(session.updatedAt ?? "")
@@ -339,6 +355,8 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
     // one already supplied. No transcript snapshot is restored merely to draw either view.
     for (const { session, titleOverride } of service.ownedSessionIndex(directory)) {
       if (hiddenSessionIDs?.has(session.id) || deletedSessionIDs.has(session.id)) continue
+      const title = titleOverride || session.title
+      if (!matchesQuery(title, session.id, session.directory)) continue
       const listed = visible.get(session.id)
       if (listed && titleOverride) {
         visible.set(session.id, { ...listed, title: titleOverride })
@@ -445,13 +463,16 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
         return
       }
       if (request.method === "GET" && url.pathname === "/experimental/session") {
-        const page = await listVisibleSessionMetadata(directory, url.searchParams.get("cursor") || undefined, requestedWindowMs(url, defaultWindowMs))
+        const query = url.searchParams.get("q")?.trim() || ""
+        const windowMs = query && !url.searchParams.has("days") ? 0 : requestedWindowMs(url, defaultWindowMs)
+        const page = await listVisibleSessionMetadata(directory, url.searchParams.get("cursor") || undefined, windowMs, query)
         if (page.nextCursor) response.setHeader("x-next-cursor", page.nextCursor)
         writeJSON(response, 200, page.sessions)
         return
       }
       if (request.method === "GET" && (url.pathname === "/v1/sessions" || url.pathname === "/session")) {
-        writeJSON(response, 200, await listVisibleSessions(directory))
+        const query = url.searchParams.get("q")?.trim() || ""
+        writeJSON(response, 200, await listVisibleSessions(directory, query))
         return
       }
       if (request.method === "GET" && url.pathname === "/session/status") {

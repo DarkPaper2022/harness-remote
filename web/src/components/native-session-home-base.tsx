@@ -3,6 +3,7 @@ import { listMachineProjects, type MachineProject } from "../machineClient"
 import { canCreateNativeSession, createNativeSessionTarget } from "../native-session-create"
 import {
   discoverAgentNativeSessionPage,
+  searchAgentNativeSessions,
   nativeSessionSurfaceTarget,
   type NativeSessionRecord,
   type NativeSessionSurfaceTarget
@@ -449,6 +450,8 @@ export function NativeSessionHome({
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [olderSessionError, setOlderSessionError] = useState<string | null>(null)
   const [query, setQuery] = useState("")
+  const [searchResults, setSearchResults] = useState<RecordWithMachine[] | null>(null)
+  const [searching, setSearching] = useState(false)
   const [filter, setFilter] = useState<SessionFilter>("all")
   const [machineFilter, setMachineFilter] = useState("")
   const [agentFilter, setAgentFilter] = useState("")
@@ -688,15 +691,62 @@ export function NativeSessionHome({
     return () => window.cancelAnimationFrame(frame)
   }, [expandedProjects, selectedKey])
 
+  useEffect(() => {
+    const trimmed = query.trim()
+    if (!trimmed) {
+      setSearchResults(null)
+      setSearching(false)
+      return
+    }
+    let cancelled = false
+    setSearching(true)
+    const timer = window.setTimeout(() => {
+      void Promise.all(sources.map(async ({ machine, snapshot }) => {
+        if (!snapshot) return []
+        const projects = projectsByMachine[machine.id] ?? []
+        const agentPages = await Promise.all(snapshot.agents.map(async (agent) => {
+          const page = await searchAgentNativeSessions(machine.config, agent, trimmed).catch(() => ({ records: [] }))
+          return page.records.map((record) => ({
+            machine,
+            machineID: snapshot.machine.id,
+            record,
+            project: catalogProject(record, projects, snapshot.machine.id)
+          }))
+        }))
+        return agentPages.flat()
+      })).then((results) => {
+        if (cancelled) return
+        setSearchResults(results.flat())
+        setSearching(false)
+      }).catch(() => {
+        if (cancelled) return
+        setSearching(false)
+      })
+    }, 250)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [query, sources, projectsByMachine])
+
+  const effectiveRecords = useMemo(() => {
+    if (query.trim() && searchResults !== null) {
+      return uniqueSessionRecords([...searchResults, ...records])
+        .filter((item) => !deletedKeysRef.current?.has(recordKey(item)))
+    }
+    return records
+  }, [query, searchResults, records])
+
   const machineChoices = useMemo(() => sources.map(({ machine, snapshot }) => ({
     id: machine.id,
     label: snapshot?.machine.name || machine.name,
-    count: records.filter((item) => item.machine.id === machine.id).length
-  })), [records, sources])
+    count: effectiveRecords.filter((item) => item.machine.id === machine.id).length
+  })), [effectiveRecords, sources])
 
   const machineScopedRecords = useMemo(
-    () => machineFilter ? records.filter((item) => item.machine.id === machineFilter) : records,
-    [machineFilter, records]
+    () => machineFilter ? effectiveRecords.filter((item) => item.machine.id === machineFilter) : effectiveRecords,
+    [machineFilter, effectiveRecords]
   )
 
   const agentChoices = useMemo(() => {
@@ -1057,7 +1107,7 @@ export function NativeSessionHome({
       {records.length > 0 ? (
         <div className="hr-native-home-tools">
           <label className="hr-native-session-search">
-            <SearchIcon size={14} />
+            {searching ? <LoadingIcon size={14} /> : <SearchIcon size={14} />}
             <input
               type="search"
               value={query}
@@ -1379,7 +1429,7 @@ export function NativeSessionHome({
         })}
       </div>
 
-      {loaded && olderPageTargets.length > 0 ? (
+      {loaded && olderPageTargets.length > 0 && !query.trim() ? (
         <div className="hr-native-home-pagination">
           <button type="button" className="tdw-button secondary" onClick={() => void loadOlderSessions()} disabled={loading || loadingOlder} aria-busy={loadingOlder}>
             {loadingOlder ? <LoadingIcon size={14} /> : null}

@@ -300,6 +300,38 @@ export async function discoverAgentNativeSessionPage(
 }
 
 /**
+ * Search native sessions across all history for one harness. When a query is provided, the backend
+ * searches across the full historical index (unbounded recent-activity window) matching title,
+ * directory, or session ID.
+ */
+export async function searchAgentNativeSessions(
+  base: ServerConfig,
+  agent: MachineAgentHost,
+  query: string,
+  client: NativeSessionPageReadApi = api,
+  timeoutMs = NATIVE_SESSION_DISCOVERY_BUDGET_MS
+): Promise<NativeSessionRecordPage> {
+  if (agent.capabilities?.sessions === false || !query.trim()) return { records: [] }
+  const config = nativeSessionConfig(base, agent)
+  const startedAt = Date.now()
+  const remaining = () => Math.max(1, timeoutMs - (Date.now() - startedAt))
+  const bounded = <T>(work: Promise<T>) => withinNativeSessionDiscoveryBudget(work, agent.id, remaining())
+
+  try {
+    const page = await bounded(client.listGlobalSessionPage(config, undefined, query.trim()))
+    const statuses = page.sessions.some((session) => !session.status)
+      ? await bounded(client.listStatuses(config)).catch(() => ({} as Record<string, SessionStatus>))
+      : {}
+    return {
+      records: nativeSessionRecords(agent, config, page.sessions, statuses),
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+    }
+  } catch {
+    return { records: [] }
+  }
+}
+
+/**
  * Read-only discovery for one native harness. The experimental global listing is preferred because
  * it already provides pagination for large histories; harnesses that do not expose it fall back to
  * the stable Session endpoint. Status is enrichment only and must never make discovery fail.
