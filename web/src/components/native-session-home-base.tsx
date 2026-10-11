@@ -452,6 +452,10 @@ export function NativeSessionHome({
   const [query, setQuery] = useState("")
   const [searchResults, setSearchResults] = useState<RecordWithMachine[] | null>(null)
   const [searching, setSearching] = useState(false)
+  const [searchError, setSearchError] = useState<string | null>(null)
+  const [searchRevision, setSearchRevision] = useState(0)
+  const searchContextRef = useRef({ sources, projectsByMachine })
+  searchContextRef.current = { sources, projectsByMachine }
   const [filter, setFilter] = useState<SessionFilter>("all")
   const [machineFilter, setMachineFilter] = useState("")
   const [agentFilter, setAgentFilter] = useState("")
@@ -696,16 +700,23 @@ export function NativeSessionHome({
     if (!trimmed) {
       setSearchResults(null)
       setSearching(false)
+      setSearchError(null)
       return
     }
     let cancelled = false
     setSearching(true)
+    setSearchError(null)
+    setSearchResults(null)
     const timer = window.setTimeout(() => {
-      void Promise.all(sources.map(async ({ machine, snapshot }) => {
+      const errors: string[] = []
+      void Promise.all(searchContextRef.current.sources.map(async ({ machine, snapshot }) => {
         if (!snapshot) return []
-        const projects = projectsByMachine[machine.id] ?? []
         const agentPages = await Promise.all(snapshot.agents.map(async (agent) => {
-          const page = await searchAgentNativeSessions(machine.config, agent, trimmed).catch(() => ({ records: [] }))
+          const page = await searchAgentNativeSessions(machine.config, agent, trimmed).catch((error: unknown) => {
+            errors.push(`${machine.name} / ${agent.label || agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+            return { records: [] }
+          })
+          const projects = searchContextRef.current.projectsByMachine[machine.id] ?? []
           return page.records.map((record) => ({
             machine,
             machineID: snapshot.machine.id,
@@ -717,9 +728,11 @@ export function NativeSessionHome({
       })).then((results) => {
         if (cancelled) return
         setSearchResults(results.flat())
+        setSearchError(errors.length ? errors.join("; ") : null)
         setSearching(false)
-      }).catch(() => {
+      }).catch((error: unknown) => {
         if (cancelled) return
+        setSearchError(error instanceof Error ? error.message : String(error))
         setSearching(false)
       })
     }, 250)
@@ -728,7 +741,9 @@ export function NativeSessionHome({
       cancelled = true
       window.clearTimeout(timer)
     }
-  }, [query, sources, projectsByMachine])
+    // Machine snapshots and project catalogs poll frequently. Their new object identities must
+    // not cancel a search before its slowest harness can finish.
+  }, [query, machineSignature, refreshToken, authoritativeRefreshToken, searchRevision])
 
   const effectiveRecords = useMemo(() => {
     if (query.trim() && searchResults !== null) {
@@ -1104,7 +1119,7 @@ export function NativeSessionHome({
         </div>
       </div>
 
-      {records.length > 0 ? (
+      {sources.some(({ snapshot }) => snapshot?.agents.some((agent) => agent.capabilities?.sessions !== false)) ? (
         <div className="hr-native-home-tools">
           <label className="hr-native-session-search">
             {searching ? <LoadingIcon size={14} /> : <SearchIcon size={14} />}
@@ -1132,7 +1147,7 @@ export function NativeSessionHome({
               <label className="hr-native-scope">
                 <ServerIcon size={13} />
                 <select value={machineFilter} onChange={(event) => setMachineFilter(event.target.value)} aria-label={t("sf.filterByMachine")}>
-                  <option value="">{t("sf.allMachinesCount", { count: records.length })}</option>
+                  <option value="">{t("sf.allMachinesCount", { count: effectiveRecords.length })}</option>
                   {machineChoices.map((choice) => <option value={choice.id} key={choice.id}>{choice.label} · {choice.count}</option>)}
                 </select>
                 <ChevronDownIcon size={12} />
@@ -1255,6 +1270,12 @@ export function NativeSessionHome({
         <div className="hr-native-home-notice" role="alert">
           <span><strong>{t("sf.olderSessionsFailed")}</strong> {olderSessionError}</span>
           <button type="button" className="tdw-button secondary" onClick={() => olderPageTargets.length ? void loadOlderSessions() : setRevision((value) => value + 1)} disabled={loading || loadingOlder}>{t("sf.retry")}</button>
+        </div>
+      ) : null}
+      {searchError ? (
+        <div className="hr-native-home-notice" role="alert">
+          <span><strong>{t("sf.searchFailed")}</strong> {searchError}</span>
+          <button type="button" className="tdw-button secondary" onClick={() => setSearchRevision((value) => value + 1)} disabled={searching}>{t("sf.retry")}</button>
         </div>
       ) : null}
 

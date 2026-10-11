@@ -3,6 +3,7 @@ import {
   discoverAgentNativeSessionPage,
   discoverAgentNativeSessions,
   discoverMachineNativeSessions,
+  searchAgentNativeSessions,
   NativeSessionDiscoveryTimeoutError,
   nativeSessionConfig,
   nativeSessionSurfaceTarget
@@ -335,5 +336,56 @@ const records = await discoverMachineNativeSessions(base, [
   { ...codex, id: 'broken', label: 'Broken', backend: 'claude' }
 ], machineClient)
 assert.deepEqual(records.map((record) => record.key), ['codex:codex-session', 'pi:pi-session'])
+
+const searchCalls = []
+const searchPage = await searchAgentNativeSessions(base, codex, ' older ', {
+  async listGlobalSessionPage(config, cursor, query) {
+    searchCalls.push([config.agentId, cursor, query])
+    // Filtering a native page can leave an empty page with more matches further back.
+    if (!cursor) return { sessions: [], nextCursor: 'page-2' }
+    return {
+      sessions: [{ id: 'older-match', title: 'Older', directory: '/repo', time: { created: 1, updated: 2 }, status: { type: 'idle' } }]
+    }
+  },
+  async listSessions() { throw new Error('search must stay on the metadata index') },
+  async listStatuses() { throw new Error('inline status needs no enrichment') }
+})
+assert.deepEqual(searchCalls, [['codex', undefined, 'older'], ['codex', 'page-2', 'older']])
+assert.deepEqual(searchPage.records.map((record) => record.session.id), ['older-match'])
+assert.equal(searchPage.nextCursor, undefined)
+
+await assert.rejects(searchAgentNativeSessions(base, codex, 'older', {
+  async listGlobalSessionPage() { throw new Error('index unavailable') },
+  async listSessions() { return [] },
+  async listStatuses() { return {} }
+}), /index unavailable/, 'a failed search must not look like an authoritative empty result')
+
+await assert.rejects(searchAgentNativeSessions(base, codex, 'older', {
+  async listGlobalSessionPage() { return { sessions: [], nextCursor: 'repeated' } },
+  async listSessions() { return [] },
+  async listStatuses() { return {} }
+}), /cursor/i, 'a repeated cursor must not loop forever or report incomplete search as complete')
+
+let searchStatusReads = 0
+const overlappingSearch = await searchAgentNativeSessions(base, codex, 'older', {
+  async listGlobalSessionPage(config, cursor) {
+    const match = { id: 'older-match', title: cursor ? 'Updated title' : 'Old title', directory: '/repo', time: { created: 1, updated: 2 } }
+    return cursor ? { sessions: [match] } : { sessions: [match], nextCursor: 'next' }
+  },
+  async listSessions() { throw new Error('search must not replay transcripts') },
+  async listStatuses() { searchStatusReads += 1; return { 'older-match': { type: 'busy' } } }
+})
+assert.equal(overlappingSearch.records.length, 1, 'overlapping native pages must not duplicate search results')
+assert.equal(overlappingSearch.records[0].session.title, 'Updated title')
+assert.equal(overlappingSearch.records[0].status.type, 'busy')
+assert.equal(searchStatusReads, 1, 'status enrichment runs once after all search pages')
+
+await assert.rejects(searchAgentNativeSessions(base, codex, 'older', {
+  async listGlobalSessionPage(config, cursor) {
+    return cursor ? new Promise(() => {}) : { sessions: [], nextCursor: 'hung-page' }
+  },
+  async listSessions() { throw new Error('a timed-out search must not start transcript discovery') },
+  async listStatuses() { return {} }
+}, 25), (error) => error instanceof NativeSessionDiscoveryTimeoutError, 'the same timeout budget covers the entire search, including later pages')
 
 console.log('native session discovery tests passed')

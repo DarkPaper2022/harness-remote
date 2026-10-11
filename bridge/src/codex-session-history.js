@@ -245,8 +245,16 @@ async function codexConfiguredModelProvider(codexHome) {
 
 function decodeCodexListCursor(cursor) {
   if (typeof cursor !== "string" || !cursor.startsWith(CODEX_LIST_CURSOR_PREFIX)) return undefined
-  const value = Number(cursor.slice(CODEX_LIST_CURSOR_PREFIX.length))
-  return Number.isSafeInteger(value) && value > 0 ? value : undefined
+  const match = /^(\d+)(?::(.+))?$/.exec(cursor.slice(CODEX_LIST_CURSOR_PREFIX.length))
+  if (!match) return undefined
+  const createdAtMs = Number(match[1])
+  if (!Number.isSafeInteger(createdAtMs) || createdAtMs <= 0) return undefined
+  try {
+    // Accept the old timestamp-only format for clients already holding a cursor.
+    return { createdAtMs, id: match[2] ? decodeURIComponent(match[2]) : undefined }
+  } catch {
+    return undefined
+  }
 }
 
 async function listCodexThreads({ codexHome, cursor, sinceMs, query, limit = CODEX_LIST_PAGE_LIMIT }) {
@@ -264,8 +272,8 @@ async function listCodexThreads({ codexHome, cursor, sinceMs, query, limit = COD
         ? "COALESCE(preview, '')"
         : "''"
   const modelProvider = columns.has("model_provider") ? await codexConfiguredModelProvider(codexHome) : undefined
-  const beforeCreatedAt = cursor === undefined ? undefined : decodeCodexListCursor(cursor)
-  if (cursor !== undefined && beforeCreatedAt === undefined) return undefined
+  const before = cursor === undefined ? undefined : decodeCodexListCursor(cursor)
+  if (cursor !== undefined && before === undefined) return undefined
   const boundedLimit = Math.max(1, Math.min(200, Number(limit) || CODEX_LIST_PAGE_LIMIT))
 
   const sqlite = await loadSqliteModule()
@@ -287,11 +295,16 @@ async function listCodexThreads({ codexHome, cursor, sinceMs, query, limit = COD
       conditions.push(`(${titleExpression} LIKE ? OR cwd LIKE ? OR id LIKE ?)`)
       parameters.push(pattern, pattern, pattern)
     }
-    if (beforeCreatedAt !== undefined) {
-      conditions.push("created_at_ms < ?")
-      parameters.push(beforeCreatedAt)
+    if (before) {
+      if (before.id !== undefined) {
+        conditions.push("(created_at_ms < ? OR (created_at_ms = ? AND id < ?))")
+        parameters.push(before.createdAtMs, before.createdAtMs, before.id)
+      } else {
+        conditions.push("created_at_ms < ?")
+        parameters.push(before.createdAtMs)
+      }
     }
-    const rows = databaseHandle.prepare(`SELECT id, cwd, ${titleExpression} AS title, created_at_ms AS createdAtMs, updated_at_ms AS updatedAtMs FROM threads WHERE ${conditions.join(" AND ")} ORDER BY created_at_ms DESC LIMIT ?`).all(...parameters, boundedLimit + 1)
+    const rows = databaseHandle.prepare(`SELECT id, cwd, ${titleExpression} AS title, created_at_ms AS createdAtMs, updated_at_ms AS updatedAtMs FROM threads WHERE ${conditions.join(" AND ")} ORDER BY created_at_ms DESC, id DESC LIMIT ?`).all(...parameters, boundedLimit + 1)
     const hasMore = rows.length > boundedLimit
     const page = hasMore ? rows.slice(0, boundedLimit) : rows
     const sessions = page.map((row) => ({
@@ -303,7 +316,7 @@ async function listCodexThreads({ codexHome, cursor, sinceMs, query, limit = COD
     const last = page[page.length - 1]
     return {
       sessions,
-      ...(hasMore && last ? { nextCursor: `${CODEX_LIST_CURSOR_PREFIX}${last.createdAtMs}` } : {})
+      ...(hasMore && last ? { nextCursor: `${CODEX_LIST_CURSOR_PREFIX}${last.createdAtMs}:${encodeURIComponent(last.id)}` } : {})
     }
   } catch {
     return undefined

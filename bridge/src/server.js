@@ -268,12 +268,18 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
   // the startup screen is still settling. The cache stores the raw harness page so late filtering
   // (window, hidden, deleted, ownership) still happens per request and cannot go stale.
   const nativePageCache = new Map()
-  const loadNativePage = (cursor, sinceMs, query = "") => {
-    const key = `${cursor ?? ""}\u0000${sinceMs ?? ""}\u0000${query ?? ""}`
+  const loadNativePage = (cursor, windowMs, query = "") => {
+    // Cache by the requested window, not its moving millisecond cutoff. The exact window filter
+    // still runs per response, and the database cutoff is refreshed when the short TTL expires.
+    const key = `${cursor ?? ""}\u0000${windowMs}\u0000${query ?? ""}`
     const entry = nativePageCache.get(key)
     const now = Date.now()
     if (entry?.value && now - entry.at < cacheTtlMs) return Promise.resolve(entry.value)
     if (entry?.promise) return entry.promise
+    for (const [cachedKey, cached] of nativePageCache) {
+      if (cached.value && now - cached.at >= cacheTtlMs) nativePageCache.delete(cachedKey)
+    }
+    const sinceMs = windowMs > 0 ? now - windowMs : 0
     const promise = (async () => {
       // The Codex state database can answer the listing without paying for `thread/list`, which
       // materialises every preview. `undefined` means the fast path is unavailable, not empty.
@@ -286,11 +292,16 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
           ? { sessions: [] }
           : await acp.listSessions().then((sessions) => ({ sessions })))
       serviceOptions?.onSessionDirectories?.(page.sessions.map((session) => session.cwd).filter((cwd) => typeof cwd === "string" && cwd))
-      nativePageCache.set(key, { value: page, at: Date.now() })
       return page
     })()
     nativePageCache.set(key, { promise })
-    promise.catch(() => {
+    while (nativePageCache.size > 128) nativePageCache.delete(nativePageCache.keys().next().value)
+    promise.then((page) => {
+      // A mutation may have invalidated this read while it was in flight.
+      if (nativePageCache.get(key)?.promise === promise) {
+        nativePageCache.set(key, { value: page, at: Date.now() })
+      }
+    }, () => {
       if (nativePageCache.get(key)?.promise === promise) nativePageCache.delete(key)
     })
     return promise
@@ -318,7 +329,7 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
   const listVisibleSessionMetadata = async (directory, cursor, windowMs = defaultWindowMs, query = "") => {
     const cutoff = Number.isFinite(windowMs) && windowMs > 0 ? Date.now() - windowMs : 0
     const [page, deletedSessionIDs] = await Promise.all([
-      loadNativePage(cursor, cutoff, query),
+      loadNativePage(cursor, windowMs, query),
       service.deletedSessionIDs()
     ])
     await recoverMissingUpdatedAt(page.sessions)
@@ -393,8 +404,12 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
     const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`)
     const directory = url.searchParams.get("directory") || undefined
     // A create/rename/delete/prompt must be visible on the very next read, so any cached native page
-    // is dropped before the mutation runs. Reads keep the short TTL that absorbs startup bursts.
-    if (request.method !== "GET") nativePageCache.clear()
+    // is dropped before and after the mutation. A read during a mutation must not populate a stale
+    // page that survives its completion. Reads keep the short TTL that absorbs startup bursts.
+    if (request.method !== "GET") {
+      nativePageCache.clear()
+      response.once("finish", () => nativePageCache.clear())
+    }
     if (config.logRequests && url.pathname === "/config/providers") process.stderr.write(`[bridge] ${request.method} ${url.pathname}${url.search}\n`)
     try {
       if (request.method === "GET" && (url.pathname === "/v1/machine" || url.pathname === "/global/machine")) {

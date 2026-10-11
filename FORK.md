@@ -33,7 +33,11 @@ git push origin darkpaper
 
 会话列表默认只包含最近 7 天内有活动的会话（按 harness 时间戳；PI 适配器缺失 `updatedAt` 时用日志文件 `mtime` 回填）。可用 `--session-days <n>` 或 `HARNESS_REMOTE_SESSION_DAYS` 调整，`0` 表示全部；单次请求可用 `?days=<n>` 或 `?all=1` 覆盖，非法取值返回 400。原生列表页按 `cursor + 时间窗口` 做单飞合并并缓存约 3 秒，写操作会立即失效缓存，因此删除、改名或新建会话在下次读取时即可见。
 
-Codex 的 `thread/list` 需要扫描约 500MB 的 `thread_history_1.sqlite`，是启动卡顿的主因。本 fork 在 `bridge/src/codex-session-history.js` 中通过受保护的动态 `import("node:sqlite")` 直接查询 `state_<n>.sqlite` 的 `threads` 表（要求 Node 22.5+），失败或遇到未知游标时自动回退到 ACP。分页游标格式为 `codex-created:<created_at_ms>`。
+Codex 的 `thread/list` 需要扫描约 500MB 的 `thread_history_1.sqlite`，是启动卡顿的主因。本 fork 在 `bridge/src/codex-session-history.js` 中通过受保护的动态 `import("node:sqlite")` 直接查询 `state_<n>.sqlite` 的 `threads` 表（要求 Node 22.5+），失败或遇到未知游标时自动回退到 ACP。分页游标格式为 `codex-created:<created_at_ms>:<session_id>`，以 ID 打破时间戳相同的分页边界，并兼容旧的时间戳游标。
+
+历史搜索会读取所有结果分页（包括过滤后的空页），与默认 7 天浏览窗口独立；没有近期会话时仍显示搜索框。机器轮询不会取消正在进行的搜索，失败时显示错误并支持重试。列表缓存以窗口长度为键并限制容量，写操作开始和完成都会失效缓存，失效前发起的读取不能回写旧结果。
+
+iOS 发布时由 `web/package.json` 设置 IPA 内部 `CFBundleShortVersionString`，以 Actions 运行序号设置 `CFBundleVersion`，并在打包前检查两者。软件源中的版本必须与 IPA 内部版本一致。
 
 相关回归测试在 `bridge/test/server.test.js`、`bridge/test/codex-session-history.test.js`、`bridge/test/pi-session-history.test.js`、`bridge/test/project-catalog.test.js`、`bridge/test/machine-daemon.test.js` 与 `bridge/test/config.test.js`。
 

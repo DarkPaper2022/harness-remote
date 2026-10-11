@@ -344,6 +344,7 @@ type TranslationKey =
   | 'sf.noWorkingDirectory'
   | 'sf.findingSessions'
   | 'sf.refreshFailed'
+  | 'sf.searchFailed'
   | 'sf.refreshFailedDetail'
   | 'sf.retry'
   | 'sf.noMatch'
@@ -838,6 +839,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noWorkingDirectory': 'No working directory',
     'sf.findingSessions': 'Finding Sessions from your coding agents…',
     'sf.refreshFailed': 'Session refresh failed.',
+    'sf.searchFailed': 'Session search failed. Results may be incomplete.',
     'sf.refreshFailedDetail': 'Previously loaded Sessions remain available.',
     'sf.retry': 'Retry',
     'sf.noMatch': 'No Sessions match this view.',
@@ -1332,6 +1334,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noWorkingDirectory': 'Nessuna directory di lavoro',
     'sf.findingSessions': 'Ricerca delle sessioni nei tuoi coding agent…',
     'sf.refreshFailed': 'Aggiornamento delle sessioni non riuscito.',
+    'sf.searchFailed': 'Ricerca delle sessioni non riuscita. I risultati potrebbero essere incompleti.',
     'sf.refreshFailedDetail': 'Le sessioni già caricate restano disponibili.',
     'sf.retry': 'Riprova',
     'sf.noMatch': 'Nessuna sessione corrisponde a questa vista.',
@@ -1826,6 +1829,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noWorkingDirectory': '沒有工作目錄',
     'sf.findingSessions': '正在從編碼代理尋找工作階段…',
     'sf.refreshFailed': '工作階段重新整理失敗。',
+    'sf.searchFailed': '工作階段搜尋失敗，結果可能不完整。',
     'sf.refreshFailedDetail': '先前載入的工作階段仍可使用。',
     'sf.retry': '重試',
     'sf.noMatch': '沒有工作階段符合這個檢視。',
@@ -2320,6 +2324,7 @@ const translations: Record<LanguageCode, Partial<Record<TranslationKey, string>>
     'sf.noWorkingDirectory': '没有工作目录',
     'sf.findingSessions': '正在从编码代理查找会话…',
     'sf.refreshFailed': '会话刷新失败。',
+    'sf.searchFailed': '会话搜索失败，结果可能不完整。',
     'sf.refreshFailedDetail': '先前加载的会话仍然可用。',
     'sf.retry': '重试',
     'sf.noMatch': '没有会话匹配当前视图。',

@@ -2491,15 +2491,18 @@ test("concurrent identical listings are coalesced into a single backend call", a
     notify() {}
   }
 
-  const bridge = await startServer({ acp: new SlowAcp() })
+  const bridge = await startServer({ acp: new SlowAcp(), sessionDays: 7 })
   try {
     const [first, second] = await Promise.all([
       readJSON(bridge.baseURL, "/experimental/session"),
-      readJSON(bridge.baseURL, "/experimental/session")
+      new Promise((resolve) => setTimeout(resolve, 5)).then(() => readJSON(bridge.baseURL, "/experimental/session"))
     ])
     assert.deepEqual(first.map((session) => session.id), ["only"])
     assert.deepEqual(second.map((session) => session.id), ["only"])
     assert.equal(calls, 1)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    await readJSON(bridge.baseURL, "/session/status")
+    assert.equal(calls, 1, "the moving seven-day cutoff must not defeat the resolved page cache")
   } finally {
     await bridge.close()
   }
@@ -2562,6 +2565,90 @@ test("a mutation invalidates the cached native page so the next read is fresh", 
     await readJSON(bridge.baseURL, "/experimental/session")
     assert.equal(calls, 2, "a mutation must not leave a stale page behind")
   } finally {
+    await bridge.close()
+  }
+})
+
+test("a listing started before a mutation cannot repopulate the invalidated cache", async () => {
+  let calls = 0
+  let title = "Before mutation"
+  let releaseRead
+  let markReadStarted
+  const readStarted = new Promise((resolve) => { markReadStarted = resolve })
+  const readGate = new Promise((resolve) => { releaseRead = resolve })
+  class RacingAcp extends EventEmitter {
+    async start() {}
+    async listSessionPage() {
+      const page = { sessions: [{ sessionId: "external", title, cwd: process.cwd(), updatedAt: new Date().toISOString() }] }
+      if (++calls === 1) {
+        markReadStarted()
+        await readGate
+      }
+      return page
+    }
+    async request(method) {
+      if (method === "session/new") {
+        title = "After mutation"
+        return { sessionId: "created", configOptions: [] }
+      }
+      return {}
+    }
+    notify() {}
+  }
+  const bridge = await startServer({ acp: new RacingAcp(), sessionDays: 7 })
+  try {
+    const oldRead = readJSON(bridge.baseURL, "/experimental/session")
+    await readStarted
+    const created = await fetch(`${bridge.baseURL}/session`, {
+      method: "POST", headers: jsonHeaders(), body: JSON.stringify({ directory: process.cwd() })
+    })
+    assert.equal(created.status, 200)
+    releaseRead()
+    await oldRead
+    const fresh = await readJSON(bridge.baseURL, "/experimental/session")
+    assert.equal(fresh.find((session) => session.id === "external").title, "After mutation")
+    assert.equal(calls, 2)
+  } finally {
+    releaseRead()
+    await bridge.close()
+  }
+})
+
+test("a listing made during a mutation is invalidated when that mutation completes", async () => {
+  let title = "Before mutation"
+  let releaseMutation
+  let markMutationStarted
+  const mutationStarted = new Promise((resolve) => { markMutationStarted = resolve })
+  const mutationGate = new Promise((resolve) => { releaseMutation = resolve })
+  class RacingAcp extends EventEmitter {
+    async start() {}
+    async listSessionPage() {
+      return { sessions: [{ sessionId: "external", title, cwd: process.cwd(), updatedAt: new Date().toISOString() }] }
+    }
+    async request(method) {
+      if (method === "session/new") {
+        markMutationStarted()
+        await mutationGate
+        title = "After mutation"
+        return { sessionId: "created", configOptions: [] }
+      }
+      return {}
+    }
+    notify() {}
+  }
+  const bridge = await startServer({ acp: new RacingAcp(), sessionDays: 7 })
+  try {
+    const mutation = fetch(`${bridge.baseURL}/session`, {
+      method: "POST", headers: jsonHeaders(), body: JSON.stringify({ directory: process.cwd() })
+    })
+    await mutationStarted
+    assert.equal((await readJSON(bridge.baseURL, "/experimental/session"))[0].title, "Before mutation")
+    releaseMutation()
+    assert.equal((await mutation).status, 200)
+    const fresh = await readJSON(bridge.baseURL, "/experimental/session")
+    assert.equal(fresh.find((session) => session.id === "external").title, "After mutation")
+  } finally {
+    releaseMutation()
     await bridge.close()
   }
 })

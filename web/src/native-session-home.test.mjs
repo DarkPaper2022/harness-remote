@@ -1,7 +1,9 @@
 import assert from "node:assert/strict"
 import { readFileSync } from "node:fs"
+import { createElement } from "react"
+import { renderToStaticMarkup } from "react-dom/server"
 import { appendCursorPage, needsOpenCodeRailStream, projectCreateChoice, refreshCursorPage, sessionTreeRows } from "./components/native-session-home.tsx"
-import { reconcileStableSessionRecords } from "./components/native-session-home-base.tsx"
+import { NativeSessionHome, reconcileStableSessionRecords } from "./components/native-session-home-base.tsx"
 import { mergedAttentionSessionCount } from "./components/native-session-home-attention.tsx"
 import { canCreateNativeSession } from "./native-session-create.ts"
 import { classifyNativeSessionAttention, sessionNeedsAttention } from "./native-session-attention.ts"
@@ -27,6 +29,16 @@ function item(id, parentID) {
     }
   }
 }
+
+const emptyHistoryHome = renderToStaticMarkup(createElement(NativeSessionHome, {
+  sources: [{
+    machine: { id: "machine-1", name: "Machine", config: {} },
+    snapshot: { machine: { id: "daemon-1", name: "Machine" }, agents: [{ id: "codex", backend: "codex", capabilities: { sessions: true } }] },
+    state: "online"
+  }],
+  onOpen() {}
+}))
+assert.match(emptyHistoryHome, /type="search"/, "historical search remains available when the recent Session list is empty")
 
 const rows = sessionTreeRows([
   item("child-2", "root"),

@@ -248,6 +248,25 @@ test("lists Codex threads from the state database instead of paying for app-serv
 
     assert.equal(await loader.listSessions({ cursor: "not-ours" }), undefined, "an unknown cursor must fall back to ACP rather than silently restart the list")
     assert.deepEqual((await loader.listSessionDirectories()).sort(), ["/work/a", "/work/b", "/work/d", "/work/e"])
+
+    // Parallel session creation can put multiple threads at the same millisecond boundary.
+    const writer = new DatabaseSync(path.join(codexHome, "state_5.sqlite"))
+    try {
+      const insertPeer = writer.prepare("INSERT INTO threads VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      for (const id of ["peer-a", "peer-b", "peer-c"]) {
+        insertPeer.run(id, "/work/a", "Peer", "", now, now, 0, "cli", "openai")
+      }
+    } finally {
+      writer.close()
+    }
+    const seen = []
+    let cursor
+    do {
+      const page = await loader.listSessions({ limit: 2, cursor })
+      seen.push(...page.sessions.map((session) => session.sessionId))
+      cursor = page.nextCursor
+    } while (cursor)
+    assert.deepEqual(seen, ["recent", "peer-c", "peer-b", "peer-a", "preview-only", "old"], "timestamp ties must never skip or duplicate a thread")
   } finally {
     await rm(codexHome, { recursive: true, force: true })
   }

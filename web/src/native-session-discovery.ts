@@ -302,7 +302,9 @@ export async function discoverAgentNativeSessionPage(
 /**
  * Search native sessions across all history for one harness. When a query is provided, the backend
  * searches across the full historical index (unbounded recent-activity window) matching title,
- * directory, or session ID.
+ * directory, or session ID. Follow every cursor, including empty filtered pages; search results
+ * have no separate "load older" control. Errors remain visible to the caller rather than becoming
+ * authoritative empty results.
  */
 export async function searchAgentNativeSessions(
   base: ServerConfig,
@@ -317,18 +319,26 @@ export async function searchAgentNativeSessions(
   const remaining = () => Math.max(1, timeoutMs - (Date.now() - startedAt))
   const bounded = <T>(work: Promise<T>) => withinNativeSessionDiscoveryBudget(work, agent.id, remaining())
 
-  try {
-    const page = await bounded(client.listGlobalSessionPage(config, undefined, query.trim()))
-    const statuses = page.sessions.some((session) => !session.status)
-      ? await bounded(client.listStatuses(config)).catch(() => ({} as Record<string, SessionStatus>))
-      : {}
-    return {
-      records: nativeSessionRecords(agent, config, page.sessions, statuses),
-      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+  const sessions = new Map<string, Session>()
+  const cursors = new Set<string>()
+  let cursor: string | undefined
+  do {
+    if (timeoutMs > 0 && Date.now() - startedAt >= timeoutMs) {
+      throw new NativeSessionDiscoveryTimeoutError(agent.id, timeoutMs)
     }
-  } catch {
-    return { records: [] }
-  }
+    const page = await bounded(client.listGlobalSessionPage(config, cursor, query.trim()))
+    for (const session of page.sessions) sessions.set(session.id, session)
+    cursor = page.nextCursor
+    if (cursor) {
+      if (cursors.has(cursor)) throw new Error(`Native Session search for ${agent.id} returned a repeated cursor`)
+      cursors.add(cursor)
+    }
+  } while (cursor)
+  const matches = [...sessions.values()]
+  const statuses = matches.some((session) => !session.status)
+    ? await bounded(client.listStatuses(config)).catch(() => ({} as Record<string, SessionStatus>))
+    : {}
+  return { records: nativeSessionRecords(agent, config, matches, statuses) }
 }
 
 /**
