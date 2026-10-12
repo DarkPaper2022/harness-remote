@@ -19,6 +19,21 @@
   flex: 1;
 }
 
+/* The legacy Work Thread toolbar switches to a column below 980px. Native Session controls
+   remain a compact row beside their tools, even when a tablet still shows the Session rail. */
+.hr-native-session-observer .tdw-conversation-toolbar {
+  flex-direction: row;
+}
+
+.hr-native-session-observer .tdw-conversation-tools {
+  flex: none;
+}
+
+.hr-native-session-observer .tdw-conversation-state {
+  position: static;
+  margin-top: 0;
+}
+
 /* A native Session has one owning harness. Repeating it as a one-option "Continue with" select
    competes with the model and live state without offering a choice. Cross-agent continuation stays
    in the explicit header action. */
@@ -30,11 +45,13 @@
   /* Harness and Model are one routing decision. Keep the group only as wide as the controls it
      contains instead of letting the inherited flex: 1 stretch a 760px grid across the toolbar:
      that unused track space visually detached Model from Harness on wider Session panes. */
-  flex: 0 1 588px;
+  /* Keep the basis intrinsic: a horizontal width must never become a 588px height if a parent
+     toolbar is stacked by another responsive layout. Width/max-width still bound this group. */
+  flex: 0 1 auto;
   width: min(588px, 100%);
   max-width: 100%;
   display: grid;
-  grid-template-columns: minmax(150px, 220px) minmax(220px, 360px);
+  grid-template-columns: minmax(0, 220px) minmax(0, 360px);
   gap: 8px;
 }
 
@@ -48,6 +65,10 @@
 
 .hr-native-session-observer .tdw-model-control {
   width: min(360px, 100%);
+}
+
+.hr-native-session-observer .tdw-model-picker.compact {
+  width: 100%;
 }
 
 .hr-native-session-observer .tdw-connection-notice {

@@ -39,6 +39,8 @@ Codex 的 `thread/list` 需要扫描约 500MB 的 `thread_history_1.sqlite`，�
 
 iOS 发布时由 `web/package.json` 设置 IPA 内部 `CFBundleShortVersionString`，以 Actions 运行序号设置 `CFBundleVersion`，并在打包前检查两者。软件源中的版本必须与 IPA 内部版本一致。
 
+原生会话工具栏不再继承旧 Work Thread 在 980px 以下纵向排列的规则。Harness/Model 组使用内容尺寸作为 flex 基准，允许列宽随右侧会话面板收缩，状态与刷新控件保持独立宽度；避免平板竖屏将控件宽度误当作 588px 高度。浏览器验证在 web 目录运行 `npm run test:native-session-toolbar`（需安装 Playwright，可用 `PLAYWRIGHT_MODULE` 指定模块入口，`CHROMIUM_EXECUTABLE` 指定浏览器）。脚本挂载真实会话工作区，模拟 daemon，覆盖 13 种手机、平板与桌面视口，检查工具栏高度、控件排列、边界及模型菜单。
+
 相关回归测试在 `bridge/test/server.test.js`、`bridge/test/codex-session-history.test.js`、`bridge/test/pi-session-history.test.js`、`bridge/test/project-catalog.test.js`、`bridge/test/machine-daemon.test.js` 与 `bridge/test/config.test.js`。
 
 项目快捷创建的浏览器验收：在 web 中安装与上游 CI 相同的 Playwright 测试工具后，运行 `node scripts/project-session-create-smoke.mjs`。可通过 CHROMIUM_EXECUTABLE 指定已有 Chromium。脚本使用模拟机器，覆盖手机/桌面视口、项目预选、错误重试和离线保护；不会访问真实会话。
