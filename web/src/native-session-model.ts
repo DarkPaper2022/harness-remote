@@ -101,18 +101,19 @@ export function lastNativeMessageModel(messages: MessageEnvelope[]): ModelSelect
   return null
 }
 
-const PAGE_MODEL_BACKENDS = new Set(["omp", "pi", "codex"])
+const PAGE_MODEL_BACKENDS = new Set(["omp", "pi", "codex", "agy"])
 
 /**
  * Recover the last model from native Session state without persisting a second Harness Remote model.
  *
  * OpenCode stores the served/requested model on native message metadata. OMP and PI report the model
- * selected on their exact native JSONL branch and Codex reports it from the newest rollout
- * turn_context. Claude has no journal authority of its own here, but its transcript already requires
- * ACP session/load; after that load the adapter's current model config option is available through
- * the normal models endpoint, so reading it adds no parallel Session-first model state. If a harness
- * cannot prove a current model, leave it unset and let its own native default win rather than
- * resurrecting stale browser state.
+ * selected on their exact native JSONL branch, Codex reports it from the newest rollout
+ * turn_context, and Antigravity reports its ACP config selection on the message page. Claude has no
+ * journal authority of its own here, but its transcript already requires ACP session/load; after
+ * that load the adapter's current model config option is available through the normal models
+ * endpoint, so reading it adds no parallel Session-first model state. If a harness cannot prove a
+ * current model, leave it unset and let its own native default win rather than resurrecting stale
+ * browser state.
  */
 export async function resolveNativeSessionTargetModel(
   target: NativeSessionSurfaceTarget
@@ -128,7 +129,7 @@ export async function resolveNativeSessionTargetModel(
       false
     )
     let model = page.model ?? (target.backend === "opencode" ? lastNativeMessageModel(page.messages) : null)
-    if (!model && target.backend === "claude") {
+    if (!model && (target.backend === "claude" || target.backend === "agy")) {
       const models = await api.listModels(target.config, target.directory, target.sessionID)
       const current = models.find((candidate) => candidate.isDefault)
       if (current) model = {

@@ -10,7 +10,8 @@ export const BACKEND_STORAGE_KEYS = {
   omp: "opencode.remote.server.omp",
   pi: "opencode.remote.server.pi",
   claude: "opencode.remote.server.claude",
-  codex: "opencode.remote.server.codex"
+  codex: "opencode.remote.server.codex",
+  agy: "opencode.remote.server.agy"
 } as const
 
 export const SERVER_PROFILES_STORAGE_KEY = "opencode.remote.serverProfiles"
@@ -26,7 +27,7 @@ export type SavedServerProfile = {
   config: ServerConfig
 }
 
-const BACKENDS: BackendKind[] = ["opencode", "omp", "pi", "claude", "codex"]
+const BACKENDS: BackendKind[] = ["opencode", "omp", "pi", "claude", "codex", "agy"]
 
 function defaultConfig(backend: BackendKind): ServerConfig {
   return {
@@ -39,7 +40,12 @@ function defaultConfig(backend: BackendKind): ServerConfig {
 }
 
 function isBackend(value: unknown): value is BackendKind {
-  return value === "opencode" || value === "omp" || value === "pi" || value === "claude" || value === "codex"
+  return value === "opencode"
+    || value === "omp"
+    || value === "pi"
+    || value === "claude"
+    || value === "codex"
+    || value === "agy"
 }
 
 function parseConfig(value: unknown, fallbackBackend: BackendKind): ServerConfig | null {
@@ -56,7 +62,17 @@ function profileID(): string {
 }
 
 function profileName(backend: BackendKind, position: number): string {
-  const label = backend === "omp" ? "Oh My Pi" : backend === "pi" ? "PI" : backend === "claude" ? "Claude Code" : backend === "codex" ? "Codex CLI" : "OpenCode"
+  const label = backend === "omp"
+    ? "Oh My Pi"
+    : backend === "pi"
+      ? "PI"
+      : backend === "claude"
+        ? "Claude Code"
+        : backend === "codex"
+          ? "Codex CLI"
+          : backend === "agy"
+            ? "Antigravity"
+            : "OpenCode"
   return position === 0 ? `${label} server` : `${label} server ${position + 1}`
 }
 
@@ -66,6 +82,7 @@ function namedHarness(name: string): BackendKind | undefined {
   if (/\boh my pi\b|\bomp\b/.test(value)) return "omp"
   if (/(^|[\s·._-])pi([\s·._-]|$)/.test(value)) return "pi"
   if (/\bclaude\b/.test(value)) return "claude"
+  if (/\bantigravity\b|\bagy\b/.test(value)) return "agy"
   return undefined
 }
 

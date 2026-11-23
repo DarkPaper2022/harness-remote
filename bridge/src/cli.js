@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import path from "node:path"
+import { resolveAgyRuntime } from "./agy-auth.js"
+import { createAgySessionIndex } from "./agy-session-history.js"
 import { createHarnessAcpClient } from "./session-acp-client.js"
 import { parseConfig, usage } from "./config.js"
 import { harnessProfile } from "./harness-profiles.js"
@@ -32,21 +34,46 @@ if (config) {
     capabilities: profile.capabilities
   })
 
+  const agyRuntime = config.backend === "agy"
+    ? resolveAgyRuntime({ baseArgs: config.acpArgs, agyAuth: config.agyAuth, environment: process.env })
+    : undefined
+  const sessionIndex = config.backend === "agy" && (agyRuntime?.geminiDir || agyRuntime?.appDataDir)
+    ? createAgySessionIndex({
+      ...(agyRuntime.geminiDir ? { geminiDir: agyRuntime.geminiDir } : {}),
+      ...(agyRuntime.appDataDir ? { appDataDir: agyRuntime.appDataDir } : {})
+    })
+    : profile.sessionIndex
+
   const acp = trackAgentHostLifecycle(
-    createHarnessAcpClient(config.backend, { command: config.acpCommand, args: config.acpArgs, permissionMode: profile.permissionMode, preferredAuthMethod: profile.authMethod }),
+    createHarnessAcpClient(config.backend, {
+      command: config.acpCommand,
+      args: agyRuntime ? agyRuntime.args : config.acpArgs,
+      permissionMode: profile.permissionMode,
+      ...(agyRuntime
+        ? {
+          env: agyRuntime.env,
+          skipAuthenticate: agyRuntime.skipAuthenticate,
+          requiredAuthMethod: agyRuntime.requiredAuthMethod
+        }
+        : {
+          preferredAuthMethod: profile.authMethod,
+          skipAuthenticate: Boolean(profile.skipAuthenticate)
+        })
+    }),
     machineRegistry,
     profile.id
   )
   // The single-harness bridge learns its directory boundary the same way the daemon does: from the
   // working directories of the Sessions the harness already reported, with no configured root needed.
   const learnedDirectories = new Set()
+  const directoryIndex = sessionIndex ?? profile.historyLoader
   const sessionDirectories = async () => {
     const all = new Set(learnedDirectories)
-    if (typeof profile.historyLoader?.listSessionDirectories === "function") {
+    if (typeof directoryIndex?.listSessionDirectories === "function") {
       const days = Number(config.sessionDays)
       const sinceMs = Number.isFinite(days) && days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : undefined
       try {
-        for (const directory of await profile.historyLoader.listSessionDirectories({ sinceMs })) all.add(directory)
+        for (const directory of await directoryIndex.listSessionDirectories({ sinceMs })) all.add(directory)
       } catch {
         // A harness that cannot enumerate its Sessions must not take the boundary check down.
       }
@@ -61,6 +88,7 @@ if (config) {
     serviceOptions: {
       snapshotDirectory: path.join(config.stateDirectory, profile.id),
       historyLoader: profile.historyLoader,
+      sessionIndex,
       preserveListedTimestamps: profile.preserveListedTimestamps,
       reloadOnHistoryRefresh: profile.reloadOnHistoryRefresh,
       replaySettleMs: profile.replaySettleMs,

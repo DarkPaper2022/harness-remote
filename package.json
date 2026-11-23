@@ -1,6 +1,6 @@
 {
   "name": "harness-remote",
-  "version": "3.1.0",
+  "version": "3.1.3",
   "type": "module",
   "bin": {
     "harness-remote": "bridge/src/launcher.js",
@@ -18,7 +18,7 @@
   "dependencies": {
     "qrcode-terminal": "0.12.0"
   },
-  "description": "Local-first control plane for native AI coding-agent sessions across Codex CLI, Claude Code, OpenCode, Oh My Pi and PI.",
+  "description": "Local-first control plane for native AI coding-agent sessions across Codex CLI, Claude Code, Antigravity CLI, OpenCode, Oh My Pi and PI.",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
@@ -35,6 +35,8 @@
     "local-first",
     "codex",
     "claude-code",
+    "antigravity",
+    "agy",
     "opencode",
     "oh-my-pi",
     "pi",

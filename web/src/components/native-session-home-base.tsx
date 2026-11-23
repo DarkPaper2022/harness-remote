@@ -117,6 +117,7 @@ type SessionFilter = "all" | FederatedSessionBucket
 const HARNESS_ICON_FILES: Record<string, string> = {
   codex: "codex.svg",
   claude: "claude.svg",
+  agy: "agy.svg",
   opencode: "opencode.svg",
   omp: "omp.svg",
   pi: "pi.svg"

@@ -11,6 +11,7 @@
 
 - 外部 Codex 会话的模型、命令和操作列表查询不再调用 session/load，避免手机查看活动会话时触发 active writer 错误。历史仍读取原生日志，主动接续仍需取得原生写锁。
 - 服务专用 Codex 包装器沿用 API key、禁止自动弹出 OAuth 浏览器，并使用主机 Codex CLI。
+- 支持 Antigravity CLI（`agy`）后端：通过原生 `agy acp` 接入会话、斜杠命令、图片输入、模型目录与 `thought_level` 思考档位选择，并通过 `node:sqlite` 直接读取 `conversation_summaries.db` 加速会话列表与项目根目录发现（将无工作区的独立会话归入 `scratch` 目录，避免污染 daemon 启动目录）。支持通过 JSON 服务端配置文件（`--config` / `HARNESS_REMOTE_CONFIG`）或 `backend.env`（`HARNESS_REMOTE_AGY_AUTH*`）指定 `agy` 的认证来源（`cli`、`oauth-personal`、`oauth-business`、`gemini-api-key`、`agent-platform`），支持从独立密钥文件读取 `GEMINI_API_KEY` 及自定义 `GOOGLE_GEMINI_BASE_URL`，密钥仅注入 `agy` 子进程环境且默认禁用浏览器弹窗。
 - Android 下载构建强制使用本 fork 的固定 release keystore；私钥与口令只保存在 GitHub Actions Secrets 及本机私有备份，不进入 Git。由 `web/package.json` 推导 `versionCode`，每次 Android 发布都要递增版本。
 - 项目目录与会话列表按需发现：不再依赖 `HARNESS_REMOTE_ROOT` 指向的容器目录；daemon 从各 harness 已上报会话的工作目录动态生成项目与目录边界，并默认只列出最近 7 天有活动的会话。Codex 列表直接读取本地 `state_*.sqlite` 索引，启动列会话从约 6.8s 降到约 10ms。
 

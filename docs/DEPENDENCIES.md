@@ -212,6 +212,13 @@ holding the thread.
 **Watch:** the embedded `@openai/codex` version (it decides which models and modes exist), the
 rollout record shape, and any new `sessionUpdate` / notification shape.
 
+### Antigravity CLI (`agy`) — ACP over stdio, via first-party `agy acp`
+
+- **Command:** `agy acp` (built into Antigravity CLI, verified at `1.5.15`).
+- **Authentication sources:** configurable per server via `--config <json>` (`agy.auth`) or `HARNESS_REMOTE_AGY_AUTH*` environment variables (`cli`, `oauth-personal`, `oauth-business`, `gemini-api-key`, `agent-platform`). By default (`cli`), the bridge omits an upfront `authenticate` RPC so cached CLI credentials work without risking an interactive browser sign-in on a headless host.
+- **Fast index:** `createAgySessionIndex` reads `<geminiDir>/<appDataDir>/conversation_summaries.db` through guarded `node:sqlite` (`readOnly: true`), filtering out subagents (`parent_conversation_id != ''`, `nesting_depth > 0`), `killed` rows, and entries without a backing `conversations/<id>.db`, and falls back to ACP `session/list` whenever unavailable.
+- **Models & variants:** `agy acp` exposes bare model ids (`gemini-4-neon`, `claude-sonnet-5-5`, …) and per-model `thought_level` options (`low`, `medium`, `high`, `xhigh`, `max`).
+
 ## App and packaging
 
 - **Capacitor** (`@capacitor/core`, `/android`, `/cli`, `/app`) — Android packaging and the back

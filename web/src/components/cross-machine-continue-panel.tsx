@@ -28,7 +28,7 @@ type Props = {
 }
 
 function supportedBackend(value: string | undefined, fallback: BackendKind): BackendKind {
-  return value === "opencode" || value === "omp" || value === "pi" || value === "claude" || value === "codex"
+  return value === "opencode" || value === "omp" || value === "pi" || value === "claude" || value === "codex" || value === "agy"
     ? value
     : fallback
 }

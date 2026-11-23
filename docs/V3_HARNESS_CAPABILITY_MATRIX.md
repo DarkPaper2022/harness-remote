@@ -22,6 +22,7 @@ Harness Remote must not flatten harness-specific capabilities into a fake univer
 | PI | ACP over stdio JSON-RPC | ACP Session updates | ACP Session updates | fresh prompt-less technical `pi-acp` Session `configOptions` | machine | `thinkingLevel`, compatible runtime aliases only when advertised | PI |
 | Codex | ACP over stdio JSON-RPC | ACP Session updates | ACP Session updates | fresh prompt-less technical ACP Session `configOptions` | machine | `reasoning_effort` only when advertised | Codex |
 | Claude | ACP over stdio JSON-RPC | ACP Session updates | ACP Session updates | fresh prompt-less technical ACP Session `configOptions` | machine | runtime-advertised controls only; no fabricated reasoning levels | Claude |
+| Antigravity (`agy`) | ACP over stdio JSON-RPC (`agy acp`) | ACP Session updates | ACP Session updates | fresh prompt-less technical ACP Session `configOptions` | machine | `thought_level` only when advertised | Antigravity |
 
 ## Model discovery scope
 

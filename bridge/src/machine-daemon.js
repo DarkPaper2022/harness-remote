@@ -224,7 +224,7 @@ export function createMachineDaemonServer({
     const days = Number(config.sessionDays)
     const sinceMs = Number.isFinite(days) && days > 0 ? Date.now() - days * 24 * 60 * 60 * 1000 : undefined
     for (const entry of daemon.hosts.values()) {
-      const loader = entry.serviceOptions?.historyLoader
+      const loader = entry.serviceOptions?.sessionIndex ?? entry.serviceOptions?.historyLoader
       if (typeof loader?.listSessionDirectories !== "function") continue
       try {
         for (const directory of await loader.listSessionDirectories({ sinceMs })) all.add(directory)

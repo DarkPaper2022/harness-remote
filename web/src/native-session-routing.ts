@@ -108,7 +108,7 @@ function targetRecord(source: NativeSessionSurfaceTarget, ref: NativeSessionRef,
     key: `${agent.id}:${ref.sessionID}`,
     agentId: agent.id,
     agentLabel: agent.label || agent.id,
-    backend: agent.backend === "omp" || agent.backend === "pi" || agent.backend === "claude" || agent.backend === "codex"
+    backend: agent.backend === "omp" || agent.backend === "pi" || agent.backend === "claude" || agent.backend === "codex" || agent.backend === "agy"
       ? agent.backend
       : "opencode",
     transport: agent.transport,

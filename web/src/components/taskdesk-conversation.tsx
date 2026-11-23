@@ -10,6 +10,7 @@ import { TaskDeskMessageContent } from "./taskdesk-message-content"
 const HARNESS_ICON_FILES: Record<string, string> = {
   codex: "codex.svg",
   claude: "claude.svg",
+  agy: "agy.svg",
   opencode: "opencode.svg",
   omp: "omp.svg",
   pi: "pi.svg"

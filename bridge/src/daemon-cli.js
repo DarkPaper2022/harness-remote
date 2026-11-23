@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import path from "node:path"
 import { AcpClient } from "./acp-client.js"
+import { resolveAgyRuntime } from "./agy-auth.js"
+import { createAgySessionIndex } from "./agy-session-history.js"
 import { createHarnessAcpClient } from "./session-acp-client.js"
 import { AcpAgentModelCatalog, HttpAgentModelCatalog } from "./agent-model-catalog.js"
 import { ApprovalDecisionStore } from "./approval-decision-store.js"
 import { createApprovalDecisionServer } from "./approval-decision-server.js"
-import { parseConfig, usage as bridgeUsage } from "./config.js"
+import { findConfigFileOption, loadServerConfigFile, parseConfig, usage as bridgeUsage } from "./config.js"
 import { acpHarnessCapabilityContract, openCodeCapabilityContract } from "./harness-capability-contract.js"
 import { harnessProfile, resolveAcpLaunch } from "./harness-profiles.js"
 import { canListen, canListenForBind, harnessPortUnavailableMessage, resolveLaunchPlan } from "./launcher.js"
@@ -25,14 +27,47 @@ function parsePort(value, option) {
   return port
 }
 
+const BRIDGE_VALUE_OPTIONS = new Set([
+  "--config",
+  "--backend",
+  "--host",
+  "--port",
+  "--username",
+  "--password",
+  "--acp-command",
+  "--acp-arg",
+  "--root",
+  "--session-days",
+  "--cors",
+  "--state-dir",
+  "--agy-auth",
+  "--agy-auth-source",
+  "--agy-api-key-file",
+  "--agy-api-key-env",
+  "--agy-base-url",
+  "--agy-project",
+  "--agy-location",
+  "--agy-quota-project",
+  "--agy-credentials-file",
+  "--agy-gemini-dir",
+  "--agy-app-data-dir"
+])
+
 export function parseDaemonOptions(args, environment = process.env, detect = resolveLaunchPlan) {
   const bridgeArgs = []
+  const configFile = findConfigFileOption(args, environment)
+  const fileData = configFile ? loadServerConfigFile(configFile) : {}
+  const fileOpenCode = fileData.openCode
+  const fileOpenCodeObj = fileOpenCode && typeof fileOpenCode === "object" && !Array.isArray(fileOpenCode)
+    ? fileOpenCode
+    : undefined
+
   const options = {
-    openCode: true,
-    openCodeCommand: environment.HARNESS_REMOTE_OPENCODE_COMMAND ?? "opencode",
-    openCodeHost: environment.HARNESS_REMOTE_OPENCODE_HOST ?? "127.0.0.1",
-    openCodePort: parsePort(environment.HARNESS_REMOTE_OPENCODE_PORT ?? "4096", "--opencode-port"),
-    openCodeTimeout: Number(environment.HARNESS_REMOTE_OPENCODE_TIMEOUT ?? "15000")
+    openCode: fileOpenCode === false ? false : (fileOpenCodeObj?.enabled ?? true),
+    openCodeCommand: environment.HARNESS_REMOTE_OPENCODE_COMMAND ?? fileOpenCodeObj?.command ?? "opencode",
+    openCodeHost: environment.HARNESS_REMOTE_OPENCODE_HOST ?? fileOpenCodeObj?.host ?? "127.0.0.1",
+    openCodePort: parsePort(environment.HARNESS_REMOTE_OPENCODE_PORT ?? fileOpenCodeObj?.port ?? "4096", "--opencode-port"),
+    openCodeTimeout: Number(environment.HARNESS_REMOTE_OPENCODE_TIMEOUT ?? fileOpenCodeObj?.timeoutMs ?? "15000")
   }
 
   for (let index = 0; index < args.length; index += 1) {
@@ -64,7 +99,7 @@ export function parseDaemonOptions(args, environment = process.env, detect = res
       continue
     }
     bridgeArgs.push(option)
-    if (["--backend", "--host", "--port", "--username", "--password", "--acp-command", "--acp-arg", "--root", "--cors", "--state-dir"].includes(option)) {
+    if (BRIDGE_VALUE_OPTIONS.has(option)) {
       bridgeArgs.push(requireValue(args, index, option))
       index += 1
     }
@@ -76,7 +111,10 @@ export function parseDaemonOptions(args, environment = process.env, detect = res
   // its primary agent and then failed with `spawn omp ENOENT`. Resolve from PATH the way the
   // launcher already does - it owns the ACP preference order - and let its message explain a
   // machine with nothing installed rather than starting up and failing later.
-  const named = bridgeArgs.includes("--backend") || environment.HARNESS_REMOTE_BACKEND || environment.OMP_BRIDGE_BACKEND
+  const named = bridgeArgs.includes("--backend")
+    || environment.HARNESS_REMOTE_BACKEND
+    || environment.OMP_BRIDGE_BACKEND
+    || Boolean(fileData.backend)
   if (!named) bridgeArgs.push("--backend", detect(args).backend)
 
   return { config: parseConfig(bridgeArgs, environment), ...options }
@@ -129,18 +167,43 @@ async function main() {
     const launch = backend === config.backend
       ? { command: config.acpCommand, args: config.acpArgs }
       : resolveAcpLaunch(profile)
-    const agentConfig = { ...config, backend: profile.id, acpCommand: launch.command, acpArgs: launch.args }
+    const agyRuntime = backend === "agy"
+      ? resolveAgyRuntime({ baseArgs: launch.args, agyAuth: config.agyAuth, environment: process.env })
+      : undefined
+    const effectiveArgs = agyRuntime ? agyRuntime.args : launch.args
+    const clientAuthOptions = agyRuntime
+      ? {
+        env: agyRuntime.env,
+        skipAuthenticate: agyRuntime.skipAuthenticate,
+        requiredAuthMethod: agyRuntime.requiredAuthMethod
+      }
+      : {
+        preferredAuthMethod: profile.authMethod,
+        skipAuthenticate: Boolean(profile.skipAuthenticate)
+      }
+    const sessionIndex = backend === "agy" && (agyRuntime?.geminiDir || agyRuntime?.appDataDir)
+      ? createAgySessionIndex({
+        ...(agyRuntime.geminiDir ? { geminiDir: agyRuntime.geminiDir } : {}),
+        ...(agyRuntime.appDataDir ? { appDataDir: agyRuntime.appDataDir } : {})
+      })
+      : profile.sessionIndex
+    const agentConfig = { ...config, backend: profile.id, acpCommand: launch.command, acpArgs: effectiveArgs }
     const acp = createHarnessAcpClient(backend, {
       command: launch.command,
-      args: launch.args,
+      args: effectiveArgs,
       permissionMode: profile.permissionMode,
-      preferredAuthMethod: profile.authMethod
+      ...clientAuthOptions
     })
     // Model discovery owns a separate ACP connection so its prompt-less technical Session cannot
     // interfere with user-facing Session ownership. Membership and options come from the running
     // adapter itself; do not spawn a second native harness process to filter the same catalog.
     const modelCatalog = new AcpAgentModelCatalog({
-      agent: new AcpClient({ command: launch.command, args: launch.args, permissionMode: profile.permissionMode, preferredAuthMethod: profile.authMethod }),
+      agent: new AcpClient({
+        command: launch.command,
+        args: effectiveArgs,
+        permissionMode: profile.permissionMode,
+        ...clientAuthOptions
+      }),
       agentID: profile.id,
       directory: config.roots?.[0] ?? process.cwd(),
       stateDirectory: config.stateDirectory,
@@ -160,6 +223,7 @@ async function main() {
       serviceOptions: {
         snapshotDirectory: path.join(config.stateDirectory, profile.id),
         historyLoader: profile.historyLoader,
+        sessionIndex,
         preserveListedTimestamps: profile.preserveListedTimestamps,
         hiddenSessionIDs: modelCatalog.hiddenSessionIDs,
         reloadOnHistoryRefresh: profile.reloadOnHistoryRefresh,
@@ -216,19 +280,12 @@ async function main() {
     })
   }
 
+  const primaryEntry = daemon.hostEntry(primaryProfile.id)
   const machineServer = createMachineDaemonServer({
     daemon,
     config,
     primaryAcp: acp,
-    serviceOptions: {
-      snapshotDirectory: path.join(config.stateDirectory, primaryProfile.id),
-      historyLoader: primaryProfile.historyLoader,
-      preserveListedTimestamps: primaryProfile.preserveListedTimestamps,
-      hiddenSessionIDs: daemon.hostEntry(primaryProfile.id).modelCatalog.hiddenSessionIDs,
-      reloadOnHistoryRefresh: primaryProfile.reloadOnHistoryRefresh,
-      replaySettleMs: primaryProfile.replaySettleMs,
-      promptSettleMs: primaryProfile.promptSettleMs
-    }
+    serviceOptions: primaryEntry.serviceOptions
   })
   // Authorization still belongs entirely to the underlying harness. This outer server adds only a
   // durable, authenticated record of decisions that a client has already seen succeed. Every other

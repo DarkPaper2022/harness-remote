@@ -47,6 +47,9 @@ export class AcpClient extends EventEmitter {
   #spawn
   #permissionMode
   #preferredAuthMethod
+  #requiredAuthMethod
+  #skipAuthenticate
+  #env
   #child
   #buffer = ""
   #nextID = 1
@@ -61,12 +64,25 @@ export class AcpClient extends EventEmitter {
   #processGroup
   #closingPID
 
-  constructor({ command = "omp", args = ["acp"], permissionMode = "deny", preferredAuthMethod, spawnProcess = spawn, processGroup = false } = {}) {
+  constructor({
+    command = "omp",
+    args = ["acp"],
+    permissionMode = "deny",
+    preferredAuthMethod,
+    requiredAuthMethod,
+    skipAuthenticate = false,
+    env,
+    spawnProcess = spawn,
+    processGroup = false
+  } = {}) {
     super()
     this.#command = command
     this.#args = args
     this.#permissionMode = permissionMode
     this.#preferredAuthMethod = preferredAuthMethod
+    this.#requiredAuthMethod = requiredAuthMethod
+    this.#skipAuthenticate = Boolean(skipAuthenticate)
+    this.#env = env
     this.#spawn = spawnProcess
     this.#processGroup = processGroup && process.platform !== "win32"
   }
@@ -156,6 +172,7 @@ export class AcpClient extends EventEmitter {
       : ["/d", "/s", "/c", this.#command, ...this.#args]
     const child = this.#spawn(windowsCommand, windowsArgs, {
       stdio: ["pipe", "pipe", "pipe"],
+      ...(this.#env ? { env: this.#env } : {}),
       ...(this.#processGroup ? { detached: true } : {}),
       windowsHide: true
     })
@@ -204,13 +221,24 @@ export class AcpClient extends EventEmitter {
       // Codex's adapter lists `api-key` first too, but its ChatGPT login method is what reads a
       // `codex login` from disk, so a profile may name the method its harness expects.
       const authMethods = Array.isArray(initialized.authMethods) ? initialized.authMethods : []
-      let authMethod = this.#preferredAuthMethod
-        ? authMethods.find((method) => method?.id === this.#preferredAuthMethod)
-        : undefined
-      authMethod ??= authMethods.find((method) => method?.id === "agent")
-        ?? authMethods.find((method) => method?.id && method.type !== "env_var")
-        ?? authMethods.find((method) => method?.id)
-      if (authMethod) await this.request("authenticate", { methodId: authMethod.id }, remaining("authenticate"))
+      if (this.#requiredAuthMethod) {
+        const explicit = authMethods.find((method) => method?.id === this.#requiredAuthMethod)
+        if (!explicit) {
+          const offered = authMethods.map((method) => method?.id).filter(Boolean)
+          throw new Error(
+            `ACP adapter does not advertise configured auth method '${this.#requiredAuthMethod}'${offered.length ? ` (offered: ${offered.join(", ")})` : ""}`
+          )
+        }
+        await this.request("authenticate", { methodId: explicit.id }, remaining("authenticate"))
+      } else if (!this.#skipAuthenticate) {
+        let authMethod = this.#preferredAuthMethod
+          ? authMethods.find((method) => method?.id === this.#preferredAuthMethod)
+          : undefined
+        authMethod ??= authMethods.find((method) => method?.id === "agent")
+          ?? authMethods.find((method) => method?.id && method.type !== "env_var")
+          ?? authMethods.find((method) => method?.id)
+        if (authMethod) await this.request("authenticate", { methodId: authMethod.id }, remaining("authenticate"))
+      }
     } catch (error) {
       this.close()
       throw error

@@ -106,3 +106,32 @@ test("correct explicit route is not changed by matching backend hint", async () 
     await close(server)
   }
 })
+
+test("explicit non-primary ACP route is not hijacked by an older client's fallback opencode header", async () => {
+  const primary = new BridgeServer()
+  primary.on("request", (_request, response) => response.end("primary"))
+  const agy = new BridgeServer()
+  agy.on("request", (request, response) => response.end(`agy:${request.url}`))
+  const daemon = daemonWithAgents()
+  const baseHost = daemon.registry.host.bind(daemon.registry)
+  daemon.registry.host = (id) => id === "agy" ? { id: "agy", backend: "agy", state: "configured" } : baseHost(id)
+  const baseEntry = daemon.hostEntry.bind(daemon)
+  daemon.hostEntry = (id) => id === "agy" ? { id: "agy", kind: "acp" } : baseEntry(id)
+
+  const server = createAgentRoutingServer({
+    daemon,
+    config: { username: "", password: "", corsOrigins: [] },
+    primaryAgentID: "codex",
+    bridgeServer: primary,
+    acpBridgeServer: (id) => id === "agy" ? agy : undefined
+  })
+  const port = await listen(server)
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/v1/agents/agy/experimental/session`, {
+      headers: { "X-Harness-Backend": "opencode" }
+    })
+    assert.equal(await response.text(), "agy:/experimental/session")
+  } finally {
+    await close(server)
+  }
+})

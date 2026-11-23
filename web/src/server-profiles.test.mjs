@@ -26,6 +26,9 @@ assert.equal(migrated.length, 2, 'each legacy backend configuration should migra
 assert.deepEqual(migrated.map((profile) => profile.config.backend), ['opencode', 'omp'])
 
 const added = createServerProfile('Work PI', 'pi')
+const addedAgy = createServerProfile('', 'agy')
+assert.equal(addedAgy.name, 'Antigravity server')
+assert.equal(addedAgy.config.backend, 'agy')
 const profiles = [...migrated, added]
 persistServerProfiles(profiles, added.id)
 assert.equal(JSON.parse(storage.get(SERVER_PROFILES_STORAGE_KEY)).length, 3, 'saved profiles should persist as one collection')

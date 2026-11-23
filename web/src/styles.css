@@ -63,6 +63,9 @@
   --harness-codex: #047857;
   --harness-codex-soft: #e2f5ec;
   --harness-codex-border: #c1e9d5;
+  --harness-agy: #2563eb;
+  --harness-agy-soft: #e8f0fe;
+  --harness-agy-border: #bfdbfe;
 
   --focus-ring: rgba(47, 102, 245, 0.34);
   --selection: rgba(47, 102, 245, 0.18);
@@ -168,6 +171,9 @@
   --harness-codex: #34d399;
   --harness-codex-soft: rgba(4, 120, 87, 0.24);
   --harness-codex-border: rgba(52, 211, 153, 0.32);
+  --harness-agy: #60a5fa;
+  --harness-agy-soft: rgba(37, 99, 235, 0.26);
+  --harness-agy-border: rgba(96, 165, 250, 0.36);
 
   --focus-ring: rgba(126, 166, 255, 0.4);
   --selection: rgba(126, 166, 255, 0.22);

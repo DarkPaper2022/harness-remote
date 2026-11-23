@@ -55,6 +55,16 @@ function acpSessionContract(profile) {
         writerOwnership: "adapter-defined",
         stop: "owned-session-native-cancel"
       }
+    case "agy":
+      return {
+        authority: "native-harness",
+        discovery: "native-list",
+        transcript: "session-load",
+        externalWriterObservation: "unverified-session-load",
+        continuation: "session-load",
+        writerOwnership: "adapter-defined",
+        stop: "owned-session-native-cancel"
+      }
     default:
       return {
         authority: "native-harness",

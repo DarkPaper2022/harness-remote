@@ -1,4 +1,4 @@
-export type BackendKind = "opencode" | "omp" | "pi" | "claude" | "codex"
+export type BackendKind = "opencode" | "omp" | "pi" | "claude" | "codex" | "agy"
 
 export type ServerConfig = {
   backend: BackendKind

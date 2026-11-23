@@ -466,6 +466,8 @@ export class AcpService {
   #preferListedTitles
   #nativeRenameCommand
   #journalPageWhileOwned
+  #reportConfiguredModel
+  #fallbackProviderID
   #modelVariantConfigIDs
   constructor(acp, {
     snapshotDirectory,
@@ -492,6 +494,8 @@ export class AcpService {
      * replies - which is what made a second turn look blank until the conversation was reopened.
      */
     journalPageWhileOwned = true,
+    reportConfiguredModel = false,
+    fallbackProviderID,
     /**
      * Config-option ids this harness uses for the reasoning variant that belongs to a model.
      * Only used to report the Session's current selection; a variant is still applied against an
@@ -510,6 +514,8 @@ export class AcpService {
     this.#preferListedTitles = preferListedTitles
     this.#nativeRenameCommand = nativeRenameCommand
     this.#journalPageWhileOwned = journalPageWhileOwned
+    this.#reportConfiguredModel = Boolean(reportConfiguredModel)
+    this.#fallbackProviderID = fallbackProviderID
     this.#modelVariantConfigIDs = modelVariantConfigIDs
     this.#actionProviders = actionProviders
     acp.on("notification", (notification) => this.#handleNotification(notification))
@@ -588,7 +594,11 @@ export class AcpService {
       const updatedAt = this.#preserveListedTimestamps && known?.updatedAt
         ? known.updatedAt
         : session.updatedAt ?? known?.updatedAt ?? new Date().toISOString()
-      const normalized = { ...session, updatedAt }
+      const normalized = {
+        ...session,
+        ...(session.title ? {} : known?.title ? { title: known.title } : {}),
+        updatedAt
+      }
       this.#sessions.set(normalized.sessionId, normalized)
       return normalized
     })
@@ -1020,20 +1030,30 @@ export class AcpService {
    * provider reports nothing here rather than inventing one.
    */
   #configuredModelSelection(sessionID) {
-    if (this.#journalPageWhileOwned) return undefined
+    if (this.#journalPageWhileOwned && !this.#reportConfiguredModel) return undefined
     const options = this.#configOptions.get(sessionID)
     const current = options?.find((item) => item.id === "model")?.currentValue
-    if (typeof current !== "string") return undefined
+    if (typeof current !== "string" || !current) return undefined
     const separator = current.indexOf("/")
-    if (separator <= 0 || separator === current.length - 1) return undefined
+    let providerID
+    let modelID
+    if (separator > 0 && separator < current.length - 1) {
+      providerID = current.slice(0, separator)
+      modelID = current.slice(separator + 1)
+    } else if (this.#reportConfiguredModel && this.#fallbackProviderID && separator < 0) {
+      providerID = this.#fallbackProviderID
+      modelID = current
+    } else {
+      return undefined
+    }
     // The reasoning variant belongs to the selection: reporting the model without it would let the
     // app carry the next turn on with the variant silently dropped.
     const variant = this.#modelVariantConfigIDs
       .map((configId) => options?.find((item) => item.id === configId)?.currentValue)
       .find((value) => typeof value === "string" && value)
     return {
-      providerID: current.slice(0, separator),
-      modelID: current.slice(separator + 1),
+      providerID,
+      modelID,
       ...(variant ? { variant } : {})
     }
   }
@@ -1995,6 +2015,17 @@ export class AcpService {
     const { sessionId, update } = params
     const replaying = this.#replaying.has(sessionId)
     const session = this.#sessions.get(sessionId)
+    if (update.sessionUpdate === "session_info_update") {
+      if (session && typeof update.title === "string" && update.title.trim()) {
+        session.title = update.title.trim()
+        if (!replaying) session.updatedAt = new Date().toISOString()
+      }
+      if (!replaying) {
+        this.#emit("session.updated", sessionId)
+        this.#persistSnapshot(sessionId)
+      }
+      return
+    }
     if (update.sessionUpdate === "available_commands_update") {
       const commands = Array.isArray(update.availableCommands)
         ? update.availableCommands.filter((command) => typeof command?.name === "string")
@@ -2020,6 +2051,7 @@ export class AcpService {
     }
     if (update.sessionUpdate === "tool_call") {
       if (!replaying && (!this.#active.has(sessionId) || this.#cancelledSessions.has(sessionId))) return
+      this.#chunkMessageIDs.delete(`${sessionId}:user`)
       const chunkKey = `${sessionId}:assistant`
       const messageID = this.#chunkMessageIDs.get(chunkKey) ?? randomUUID()
       this.#chunkMessageIDs.set(chunkKey, messageID)
@@ -2036,21 +2068,34 @@ export class AcpService {
       // A reasoning part is closed by the part that follows it, but only the message-chunk path did
       // that: reasoning followed by a tool call — Claude's normal shape — stayed open forever, which
       // is enough on its own to keep that Activity section reading Working after the turn ended.
+      const now = Date.now()
       const openReasoning = message.parts.at(-1)
       if (openReasoning?.type === "reasoning" && openReasoning.time && !openReasoning.time.end) {
-        openReasoning.time.end = Date.now()
+        openReasoning.time.end = now
       }
+      const normalizedStatus = update.status === "in_progress"
+        ? "running"
+        : update.status === "failed"
+          ? "error"
+          : update.status
+      const output = update.rawOutput ?? update.content
+        ?.flatMap((item) => item.type === "content" && item.content?.type === "text" ? [item.content.text] : [])
+        .join("")
       message.parts.push({
         id: update.toolCallId,
         messageID,
         type: "tool",
-        tool: update._meta?.toolName ?? update.title,
+        tool: update._meta?.toolName ?? update.name ?? update.title,
         callID: update.toolCallId,
         state: {
-          status: update.status === "in_progress" ? "running" : update.status,
-          input: update.rawInput,
+          status: normalizedStatus,
+          input: update.rawInput ?? update.args,
           title: update.title,
-          time: { start: Date.now() }
+          ...(output ? { output: typeof output === "string" ? output : JSON.stringify(output) } : {}),
+          time: {
+            start: now,
+            ...(["completed", "error"].includes(normalizedStatus) ? { end: now } : {})
+          }
         }
       })
       if (!replaying) this.#emit("message.updated", sessionId)

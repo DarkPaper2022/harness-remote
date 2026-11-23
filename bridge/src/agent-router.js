@@ -89,10 +89,15 @@ export function agentScopedRequest(request) {
   }
 }
 
-function routedAgentForBackend(daemon, route, requestedBackend) {
+function routedAgentForBackend(daemon, route, requestedBackend, primaryAgentID) {
   if (!requestedBackend) return route
   const routedHost = daemon.registry.host(route.agentID)
   if (routedHost?.backend === requestedBackend) return route
+  // Older Session-first mobile builds whose BackendKind allowlist predates a newly added ACP
+  // harness (such as `agy`) still address `/v1/agents/<id>` explicitly while falling back to the
+  // machine placeholder `X-Harness-Backend: opencode`. Preserve that explicit non-primary agent
+  // route instead of diverting it into OpenCode; only the legacy 2.x wizard misrouted to primary.
+  if (routedHost && requestedBackend === "opencode" && route.agentID !== primaryAgentID) return route
   const matching = daemon.snapshot().agents.find((agent) => agent.backend === requestedBackend)
   return matching ? { ...route, agentID: matching.id } : route
 }
@@ -367,7 +372,7 @@ export function createAgentRoutingServer({
         return
       }
     }
-    route = routedAgentForBackend(daemon, route, requestedBackend)
+    route = routedAgentForBackend(daemon, route, requestedBackend, primaryAgentID)
 
     const optionalPayload = unsupportedOptionalRead(daemon, route, request.method)
     if (optionalPayload !== undefined) {

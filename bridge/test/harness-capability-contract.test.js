@@ -8,8 +8,9 @@ test("ACP capability contract preserves runtime-specific model controls without 
   const pi = acpHarnessCapabilityContract(harnessProfile("pi"))
   const codex = acpHarnessCapabilityContract(harnessProfile("codex"))
   const claude = acpHarnessCapabilityContract(harnessProfile("claude"))
+  const agy = acpHarnessCapabilityContract(harnessProfile("agy"))
 
-  for (const contract of [omp, pi, codex, claude]) {
+  for (const contract of [omp, pi, codex, claude, agy]) {
     assert.equal(contract.version, 2)
     assert.equal(contract.protocol, "acp")
     assert.equal(contract.transport.control, "stdio-json-rpc")
@@ -22,6 +23,7 @@ test("ACP capability contract preserves runtime-specific model controls without 
   assert.ok(omp.models.variantConfigIDs.includes("thinking"))
   assert.ok(pi.models.variantConfigIDs.some((id) => ["thinkingLevel", "thinking_level", "thinking"].includes(id)))
   assert.ok(codex.models.variantConfigIDs.some((id) => ["reasoning_effort", "reasoningEffort"].includes(id)))
+  assert.ok(agy.models.variantConfigIDs.includes("thought_level"))
   assert.deepEqual(claude.models.variantConfigIDs, [])
   assert.equal(claude.models.variants, "runtime-advertised-only")
 })

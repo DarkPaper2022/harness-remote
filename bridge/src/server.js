@@ -205,6 +205,7 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
   const backend = config.backend ?? "omp"
   const profile = harnessProfile(backend)
   const historyLoader = serviceOptions?.historyLoader
+  const sessionIndex = serviceOptions?.sessionIndex ?? historyLoader
   // A default recent-activity window keeps a years-old journal from being replayed into the app on
   // every launch. `0` disables it entirely, which is what the direct `createBridgeServer` tests and
   // an operator who wants the whole history both need. A per-request `?days=`/`?all=` overrides it.
@@ -218,6 +219,8 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
     preferListedTitles: profile.preferListedTitles,
     nativeRenameCommand: profile.nativeRenameCommand,
     journalPageWhileOwned: profile.journalPageWhileOwned !== false,
+    reportConfiguredModel: Boolean(profile.reportConfiguredModel),
+    fallbackProviderID: backend,
     modelVariantConfigIDs: profile.modelVariantConfigIDs ?? []
   })
   const hiddenSessionIDs = serviceOptions?.hiddenSessionIDs
@@ -281,10 +284,10 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
     }
     const sinceMs = windowMs > 0 ? now - windowMs : 0
     const promise = (async () => {
-      // The Codex state database can answer the listing without paying for `thread/list`, which
-      // materialises every preview. `undefined` means the fast path is unavailable, not empty.
-      const fast = typeof historyLoader?.listSessions === "function"
-        ? await historyLoader.listSessions({ cursor, sinceMs: sinceMs || undefined, query: query || undefined })
+      // The Codex and Antigravity SQLite summary databases can answer the listing without paying
+      // for a cold ACP boot or full preview scan. `undefined` means the fast path is unavailable.
+      const fast = typeof sessionIndex?.listSessions === "function"
+        ? await sessionIndex.listSessions({ cursor, sinceMs: sinceMs || undefined, query: query || undefined })
         : undefined
       const page = fast ?? (typeof acp.listSessionPage === "function"
         ? await acp.listSessionPage(cursor)

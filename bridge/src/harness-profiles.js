@@ -1,4 +1,5 @@
 import { findExecutable } from "./launcher.js"
+import { createAgySessionIndex } from "./agy-session-history.js"
 import { createCodexHistoryLoader } from "./codex-session-history.js"
 import { createOmpHistoryLoader } from "./omp-session-history.js"
 import { createPiHistoryLoader } from "./pi-session-history.js"
@@ -159,6 +160,35 @@ export const HARNESS_PROFILES = {
       // The adapter advertises model ids as bare ids rather than `provider/model`, which is
       // handled where the response is built. Slash commands and plan updates arrive through
       // the same notifications OMP emits, so commands and todos reflect the actual wire data.
+      models: true,
+      todos: true,
+      commands: true,
+      actions: false,
+      sessionRename: true,
+      sessionDelete: true
+    }
+  },
+  agy: {
+    id: "agy",
+    label: "Antigravity",
+    // First-party ACP stdio server built into Antigravity CLI (`agy acp`). By default it reuses
+    // cached CLI credentials without an upfront `authenticate` RPC so headless servers never open
+    // a browser; explicit auth sources (`oauth-personal`, `oauth-business`, `gemini-api-key`,
+    // `agent-platform`) can be selected in the server configuration.
+    command: "agy",
+    args: ["acp"],
+    permissionMode: "allow",
+    skipAuthenticate: true,
+    sessionIndex: createAgySessionIndex(),
+    preserveListedTimestamps: true,
+    preferListedTitles: true,
+    reloadOnHistoryRefresh: false,
+    reportConfiguredModel: true,
+    // Antigravity ACP advertises `thought_level` (`low`, `medium`, `high`, `xhigh`, `max`) on
+    // models that support reasoning-level selection.
+    modelVariantConfigIDs: ["thought_level", "thinking_level", "thinking"],
+    capabilities: {
+      ...COMMON_CAPABILITIES,
       models: true,
       todos: true,
       commands: true,

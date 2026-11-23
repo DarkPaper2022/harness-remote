@@ -6,7 +6,7 @@
 
 **A local-first control plane for native AI coding-agent sessions.**
 
-Run, observe, resume and continue work across **Codex CLI, Claude Code, OpenCode, Oh My Pi and PI** from desktop, web or Android — while code, credentials and native Sessions stay on your own machines.
+Run, observe, resume and continue work across **Codex CLI, Claude Code, Antigravity CLI (`agy`), OpenCode, Oh My Pi and PI** from desktop, web or Android — while code, credentials and native Sessions stay on your own machines.
 
 [![GitHub stars](https://img.shields.io/github/stars/giuliastro/harness-remote?style=flat&logo=github)](https://github.com/giuliastro/harness-remote/stargazers)
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-555)](LICENSE)
@@ -136,6 +136,7 @@ That means you can start in a normal CLI, open Harness Remote later, find the sa
 | **OpenCode** | HTTP + live event stream |
 | **Claude Code** | ACP adapter |
 | **Codex CLI** | ACP adapter |
+| **Antigravity CLI (`agy`)** | Native `agy acp` server |
 | **Oh My Pi (OMP)** | ACP adapter |
 | **PI** | ACP adapter |
 
