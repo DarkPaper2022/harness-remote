@@ -1,7 +1,12 @@
 name: Build iOS IPA
 
 "on":
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "GitHub-hosted macOS runner label"
+        required: false
+        default: "macos-26-intel"
   push:
     branches:
       - main
@@ -17,7 +22,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: ${{ inputs.runner || 'macos-26-intel' }}
 
     steps:
       - name: Checkout
