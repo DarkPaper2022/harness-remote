@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react"
+import { loadLanguage } from "../appPreferences"
 import { ChevronDownIcon } from "../Icons"
+import {
+  FAVORITE_MODELS_CHANGED_EVENT,
+  loadFavoriteModelKeys,
+  toggleFavoriteModelKey
+} from "../model-preferences"
 import type { ModelOption } from "../types"
 import "../model-picker.css"
 
@@ -112,6 +118,8 @@ export function ModelPicker({ models, value, onChange, disabled = false, loading
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState("")
   const [freeOnly, setFreeOnly] = useState(false)
+  const [favoriteKeys, setFavoriteKeys] = useState<string[]>(loadFavoriteModelKeys)
+  const isZh = loadLanguage().startsWith("zh")
   const rootRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const groups = useMemo(() => groupModels(models), [models])
@@ -120,6 +128,19 @@ export function ModelPicker({ models, value, onChange, disabled = false, loading
     [groups]
   )
   const selected = models.find((model) => modelOptionKey(model) === value)
+  const favoriteSet = useMemo(() => new Set(favoriteKeys), [favoriteKeys])
+  const favoriteModels = useMemo(
+    () => favoriteKeys
+      .map((key) => models.find((candidate) => modelOptionKey(candidate) === key))
+      .filter((candidate): candidate is ModelOption => Boolean(candidate)),
+    [favoriteKeys, models]
+  )
+
+  useEffect(() => {
+    const syncFavorites = () => setFavoriteKeys(loadFavoriteModelKeys())
+    window.addEventListener(FAVORITE_MODELS_CHANGED_EVENT, syncFavorites)
+    return () => window.removeEventListener(FAVORITE_MODELS_CHANGED_EVENT, syncFavorites)
+  }, [])
 
   const filtered = useMemo(() => filterModelGroups(groups, query, freeOnly), [freeOnly, groups, query])
   const visibleGroups = useMemo(() => filtered.slice(0, MAX_VISIBLE_MODEL_GROUPS), [filtered])
@@ -204,37 +225,114 @@ export function ModelPicker({ models, value, onChange, disabled = false, loading
             <input ref={searchRef} value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search model, provider, variant…" spellCheck={false} />
             <kbd>{filtered.length}</kbd>
           </div>
-          {freeCount > 0 ? (
+          {(freeCount > 0 || selected) ? (
             <div className="tdw-model-filter-row">
-              <button type="button" className={freeOnly ? "active" : ""} onClick={() => setFreeOnly((current) => !current)} aria-pressed={freeOnly}>
-                Free <b>{freeCount}</b>
-              </button>
-              <span>{freeOnly ? "Showing catalog-confirmed free models" : "Free and paid models"}</span>
+              <div className="tdw-model-filter-actions">
+                {freeCount > 0 ? (
+                  <button type="button" className={freeOnly ? "active" : ""} onClick={() => setFreeOnly((current) => !current)} aria-pressed={freeOnly}>
+                    Free <b>{freeCount}</b>
+                  </button>
+                ) : null}
+                {selected ? (
+                  <button
+                    type="button"
+                    className={`tdw-model-pin-current${favoriteSet.has(modelOptionKey(selected)) ? " pinned" : ""}`}
+                    aria-pressed={favoriteSet.has(modelOptionKey(selected))}
+                    onClick={() => setFavoriteKeys(toggleFavoriteModelKey(modelOptionKey(selected)))}
+                    title={isZh ? "将当前选中的模型及变体加入/移出置顶常用" : "Pin or unpin the currently selected model & variant"}
+                  >
+                    {favoriteSet.has(modelOptionKey(selected))
+                      ? (isZh ? "★ 已置顶当前" : "★ Pinned")
+                      : (isZh ? "☆ 置顶当前选择" : "☆ Pin current")}
+                  </button>
+                ) : null}
+              </div>
+              <span>{freeOnly ? "Showing catalog-confirmed free models" : (isZh ? "星标可置顶常用模型" : "Star to pin favorite models")}</span>
             </div>
           ) : null}
           <div className="tdw-model-results">
+            {!query.trim() && favoriteModels.length > 0 ? (
+              <section className="tdw-model-favorites" aria-label={isZh ? "置顶常用模型" : "Pinned favorite models"}>
+                <header>
+                  <strong>{isZh ? "★ 常用置顶" : "★ Pinned"}</strong>
+                  <span>{favoriteModels.length}</span>
+                </header>
+                <div className="tdw-model-favorite-pills">
+                  {favoriteModels.map((fav) => {
+                    const favKey = modelOptionKey(fav)
+                    const active = favKey === value
+                    return (
+                      <div className={`tdw-model-fav-chip${active ? " selected" : ""}`} key={favKey}>
+                        <button
+                          type="button"
+                          className="tdw-model-fav-select"
+                          onClick={(event) => {
+                            event.preventDefault()
+                            choose(fav)
+                          }}
+                        >
+                          <strong>{fav.modelName || fav.modelID}</strong>
+                          {fav.variant ? <em>{fav.variant}</em> : null}
+                        </button>
+                        <button
+                          type="button"
+                          className="tdw-model-fav-remove"
+                          aria-label={isZh ? "取消置顶" : "Unpin"}
+                          title={isZh ? "取消置顶" : "Unpin"}
+                          onClick={(event) => {
+                            event.preventDefault()
+                            event.stopPropagation()
+                            setFavoriteKeys(toggleFavoriteModelKey(favKey))
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    )
+                  })}
+                </div>
+              </section>
+            ) : null}
             {providers.length === 0 ? <div className="tdw-model-empty"><strong>No models found</strong><span>Try another model name, provider or variant.</span></div> : providers.map(([provider, providerModels]) => (
               <section className="tdw-model-provider" key={provider}>
                 <header><strong>{provider}</strong><span>{providerModels.length} model{providerModels.length === 1 ? "" : "s"}</span></header>
                 {providerModels.map((group) => {
                   const baseSelected = selected && selected.providerID === group.providerID && selected.modelID === group.modelID && !selected.variant
+                  const baseKey = modelOptionKey(group.base)
+                  const basePinned = favoriteSet.has(baseKey)
                   return (
                     <div className={`tdw-model-row${selected && selected.providerID === group.providerID && selected.modelID === group.modelID ? " selected-family" : ""}`} key={group.id}>
-                      <button
-                        type="button"
-                        className={`tdw-model-main${baseSelected ? " selected" : ""}`}
-                        onClick={(event) => {
-                          event.preventDefault()
-                          choose(group.base)
-                        }}
-                      >
-                        <span className="tdw-model-copy">
-                          <span className="tdw-model-name"><strong>{group.modelName}</strong><code>{group.modelID}</code></span>
-                          {group.description ? <small>{group.description}</small> : null}
-                          <ModelBadges group={group} />
-                        </span>
-                        <span className="tdw-model-check" aria-hidden="true">{baseSelected ? "✓" : ""}</span>
-                      </button>
+                      <div className="tdw-model-main-wrap">
+                        <button
+                          type="button"
+                          className={`tdw-model-main${baseSelected ? " selected" : ""}`}
+                          onClick={(event) => {
+                            event.preventDefault()
+                            choose(group.base)
+                          }}
+                        >
+                          <span className="tdw-model-copy">
+                            <span className="tdw-model-name"><strong>{group.modelName}</strong><code>{group.modelID}</code></span>
+                            {group.description ? <small>{group.description}</small> : null}
+                            <ModelBadges group={group} />
+                          </span>
+                          <span className="tdw-model-check" aria-hidden="true">{baseSelected ? "✓" : ""}</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={`tdw-model-star${basePinned ? " active" : ""}`}
+                          aria-pressed={basePinned}
+                          aria-label={basePinned ? `Unpin ${group.modelName}` : `Pin ${group.modelName}`}
+                          title={basePinned ? (isZh ? "取消置顶" : "Unpin model") : (isZh ? "置顶常用模型" : "Pin model")}
+                          onClick={(event) => {
+                            event.preventDefault()
+                            event.stopPropagation()
+                            setFavoriteKeys(toggleFavoriteModelKey(baseKey))
+                          }}
+                        >
+                          {basePinned ? "★" : "☆"}
+                        </button>
+                      </div>
                       {group.variants.length ? (
                         <div className="tdw-model-variants" aria-label={`${group.modelName} variants`}>
                           <span>Reasoning / variant</span>

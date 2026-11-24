@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from "react"
+import { isIosNativeHotUpdateSupported, resetIosHotUpdateToBuiltIn } from "./ios-hot-update"
 
 type Props = {
   children: ReactNode
@@ -54,6 +55,11 @@ export class ErrorBoundary extends Component<Props, State> {
           <button type="button" className="btn-secondary" onClick={() => location.reload()}>
             Reload
           </button>
+          {isIosNativeHotUpdateSupported() ? (
+            <button type="button" className="btn-secondary" onClick={() => void resetIosHotUpdateToBuiltIn()}>
+              Restore built-in iOS Web UI
+            </button>
+          ) : null}
         </div>
       </div>
     )

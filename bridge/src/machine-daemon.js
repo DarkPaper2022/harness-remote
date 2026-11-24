@@ -1,3 +1,4 @@
+import http from "node:http"
 import { createAgentRoutingServer } from "./agent-router.js"
 import { createAgentModelServer } from "./agent-model-server.js"
 import { createCrossMachineHandoffServer } from "./cross-machine-handoff-server.js"
@@ -347,7 +348,7 @@ export function createMachineDaemonServer({
       claimedAcpSessions.delete(key)
     } finally { releasingSessions.delete(key) }
   }
-  const promptSession = async (agentID, sessionID, { text, directory, model, variant, attachments = [] }) => {
+  const promptSession = async (agentID, sessionID, { text, directory, model, variant, attachments = [], delivery }) => {
     const entry = daemon.hostEntry(agentID)
     if (!entry) throw daemonError("unknown_agent", `Unknown agent: ${agentID}`)
     const requestedModel = model ? { ...model, ...(variant ? { variant } : {}) } : null
@@ -360,8 +361,7 @@ export function createMachineDaemonServer({
       // place that already loads configOptions, orders the model before its variant, and defers both
       // to dequeue when a turn is still running. Setting them here directly reordered the model
       // after the variant and mutated a live turn's configuration.
-      await service.prompt(sessionID, text, modelWireName(resolvedModel), acpPromptAttachments(attachments), acpModelVariant(resolvedModel))
-      return
+      return service.prompt(sessionID, text, modelWireName(resolvedModel), acpPromptAttachments(attachments), acpModelVariant(resolvedModel), delivery)
     }
 
     const host = entry.host
@@ -382,7 +382,7 @@ export function createMachineDaemonServer({
         headers,
         body: JSON.stringify({
           parts: [
-            { type: "text", text },
+            ...(text ? [{ type: "text", text }] : []),
             ...attachments.map((attachment) => ({
               type: "file",
               mime: attachment.mime,
@@ -710,6 +710,8 @@ export function createMachineDaemonServer({
     taskStore: tasks,
     projectCatalog: projects,
     worktreeManager: worktrees,
+    dynamicRoots: sessionDirectories,
+    webDistDir: config.webDistDir,
     diagnostics: () => ({
       ...daemon.diagnostics(),
       services: Object.fromEntries([

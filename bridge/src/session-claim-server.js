@@ -108,8 +108,9 @@ function promptInput(body) {
   const model = promptModelInput(body)
   const variant = typeof body.variant === "string" && body.variant.trim() ? body.variant.trim() : undefined
   const attachments = promptAttachmentsInput(body.attachments)
-  if (!text) throw requestError("A text prompt is required")
-  return { ...common, text, model, variant, attachments }
+  const delivery = body.delivery === "steer" || body.delivery === "queue" ? body.delivery : undefined
+  if (!text && !attachments.length) throw requestError("A prompt text or image attachment is required")
+  return { ...common, text, model, variant, attachments, ...(delivery ? { delivery } : {}) }
 }
 
 function commandInput(body) {
@@ -337,6 +338,7 @@ export function createSessionClaimServer({
             directory: input.directory,
             model: input.model,
             variant: input.variant ?? null,
+            ...(input.delivery ? { delivery: input.delivery } : {}),
             attachments: input.attachments.map((attachment) => ({
               mime: attachment.mime,
               filename: attachment.filename,

@@ -122,9 +122,9 @@ export function startTaskDeskSessionLiveRefresh({
   if (typeof document !== "undefined") document.addEventListener("visibilitychange", onVisibilityChange)
   if (typeof window !== "undefined") window.addEventListener("pageshow", onPageShow)
 
-  // `visibilitychange` is normally delivered by Android WebView, but appStateChange is the native
-  // lifecycle authority. Listen to both and deduplicate them because device/ROM behavior differs.
-  if (Capacitor.getPlatform() === "android") {
+  // `visibilitychange` is normally delivered by mobile WebViews, while appStateChange is the native
+  // lifecycle authority on both Android and iOS. Listen to both and deduplicate them.
+  if (Capacitor.isNativePlatform()) {
     void CapacitorApp.addListener("appStateChange", ({ isActive }) => {
       if (isActive) reconcileAfterForeground()
     }).then((handle) => {

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { listMachineProjects, type MachineProject } from "../machineClient"
+import { loadProjectDefaultAgent, saveProjectDefaultAgent } from "../model-preferences"
 import { canCreateNativeSession, createNativeSessionTarget } from "../native-session-create"
 import {
   discoverAgentNativeSessionPage,
@@ -455,6 +456,7 @@ export function NativeSessionHome({
   const [searching, setSearching] = useState(false)
   const [searchError, setSearchError] = useState<string | null>(null)
   const [searchRevision, setSearchRevision] = useState(0)
+  const [pinnedRecords, setPinnedRecords] = useState<Record<string, RecordWithMachine>>({})
   const searchContextRef = useRef({ sources, projectsByMachine })
   searchContextRef.current = { sources, projectsByMachine }
   const [filter, setFilter] = useState<SessionFilter>("all")
@@ -486,6 +488,18 @@ export function NativeSessionHome({
       machine.config.agentId || "",
       snapshot?.machine.id || state,
       snapshot?.agents.map((agent) => `${agent.id}:${agent.backend}:${agent.transport}:${agent.processID ?? ""}:${agent.state}`).join(",") || ""
+    ].join(":")
+  ).join("|")
+  const searchTopologySignature = sources.map(({ machine, snapshot, state }) =>
+    [
+      machine.id,
+      machine.config.host,
+      machine.config.port,
+      machine.config.username,
+      machine.config.password,
+      machine.config.agentId || "",
+      snapshot?.machine.id || (state === "online" ? "online" : "offline"),
+      snapshot?.agents.map((agent) => `${agent.id}:${agent.backend}:${agent.transport}`).join(",") || ""
     ].join(":")
   ).join("|")
   const loaded = discoveryReady && loadedSignature === machineSignature
@@ -627,9 +641,23 @@ export function NativeSessionHome({
   }, [sources, revision, refreshToken, authoritativeRefreshToken, discoveryReady, machineSignature, deletedKeys])
 
   useEffect(() => {
-    if (!loaded || document.visibilityState !== "visible") return
-    const timer = window.setInterval(() => setRevision((value) => value + 1), SESSION_HOME_REFRESH_MS)
-    return () => window.clearInterval(timer)
+    if (!loaded) return
+    let timer: number | undefined
+    const syncTimer = () => {
+      if (timer !== undefined) {
+        window.clearInterval(timer)
+        timer = undefined
+      }
+      if (document.visibilityState === "visible") {
+        timer = window.setInterval(() => setRevision((value) => value + 1), SESSION_HOME_REFRESH_MS)
+      }
+    }
+    syncTimer()
+    document.addEventListener("visibilitychange", syncTimer)
+    return () => {
+      document.removeEventListener("visibilitychange", syncTimer)
+      if (timer !== undefined) window.clearInterval(timer)
+    }
   }, [loaded])
 
   const liveStateForItem = useCallback((item: RecordWithMachine): SessionPresentationState | undefined => {
@@ -656,7 +684,85 @@ export function NativeSessionHome({
     projectPath: item.project?.path
   }, liveStateForItem(item)), [liveStateForItem])
 
-  const groups = useMemo(() => projectGroups(records), [records])
+  useEffect(() => {
+    const trimmed = query.trim()
+    if (!trimmed) {
+      setSearchResults(null)
+      setSearching(false)
+      setSearchError(null)
+      return
+    }
+    let cancelled = false
+    setSearching(true)
+    setSearchError(null)
+    const timer = window.setTimeout(() => {
+      const errors: string[] = []
+      const collectedByScope = new Map<string, RecordWithMachine[]>()
+      const tasks: Promise<void>[] = []
+
+      for (const { machine, snapshot } of searchContextRef.current.sources) {
+        if (!snapshot) continue
+        for (const agent of snapshot.agents) {
+          const scopeKey = `${machine.id}\u0000${agent.id}`
+          tasks.push((async () => {
+            try {
+              const page = await searchAgentNativeSessions(machine.config, agent, trimmed)
+              if (cancelled) return
+              const projects = searchContextRef.current.projectsByMachine[machine.id] ?? []
+              const mapped = page.records.map((record) => ({
+                machine,
+                machineID: snapshot.machine.id,
+                record,
+                project: catalogProject(record, projects, snapshot.machine.id)
+              }))
+              collectedByScope.set(scopeKey, mapped)
+              setSearchResults(uniqueSessionRecords([...collectedByScope.values()].flat()))
+            } catch (error: unknown) {
+              errors.push(`${machine.name} / ${agent.label || agent.id}: ${error instanceof Error ? error.message : String(error)}`)
+            }
+          })())
+        }
+      }
+
+      void Promise.allSettled(tasks).then(() => {
+        if (cancelled) return
+        setSearchResults(uniqueSessionRecords([...collectedByScope.values()].flat()))
+        setSearchError(errors.length ? errors.join("; ") : null)
+        setSearching(false)
+      })
+    }, 250)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+    // Machine snapshots and project catalogs poll frequently, and searching a lazy ACP agent
+    // changes its `state`/`processID`. Depend on `searchTopologySignature` instead of
+    // `machineSignature` so booting an adapter does not cancel or double-run the active search.
+  }, [query, searchTopologySignature, refreshToken, authoritativeRefreshToken, searchRevision])
+
+  const baseRecords = useMemo(() => {
+    const pinned = selectedKey && pinnedRecords[selectedKey] ? [pinnedRecords[selectedKey]] : []
+    if (query.trim() && searchResults !== null) {
+      // Put `records` first and `searchResults` last so fresher search hits win in `uniqueSessionRecords`,
+      // and include every server-returned `searchResults` hit even when matched via preview/first_user_message.
+      const serverHitKeys = new Set(searchResults.map(recordKey))
+      return uniqueSessionRecords([...pinned, ...records, ...searchResults])
+        .filter((item) => !deletedKeysRef.current?.has(recordKey(item)))
+        .filter((item) => serverHitKeys.has(recordKey(item)) || matchesFederatedSessionQuery(projectionForItem(item), query))
+    }
+    if (query.trim()) {
+      return uniqueSessionRecords([...pinned, ...records])
+        .filter((item) => !deletedKeysRef.current?.has(recordKey(item)))
+        .filter((item) => matchesFederatedSessionQuery(projectionForItem(item), query))
+    }
+    return uniqueSessionRecords([...pinned, ...records])
+      .filter((item) => !deletedKeysRef.current?.has(recordKey(item)))
+  }, [pinnedRecords, projectionForItem, query, records, searchResults, selectedKey])
+
+  const effectiveRecords = baseRecords
+
+  const groups = useMemo(() => projectGroups(effectiveRecords), [effectiveRecords])
 
   useEffect(() => {
     if (!selectedKey) return
@@ -695,64 +801,6 @@ export function NativeSessionHome({
     })
     return () => window.cancelAnimationFrame(frame)
   }, [expandedProjects, selectedKey])
-
-  useEffect(() => {
-    const trimmed = query.trim()
-    if (!trimmed) {
-      setSearchResults(null)
-      setSearching(false)
-      setSearchError(null)
-      return
-    }
-    let cancelled = false
-    setSearching(true)
-    setSearchError(null)
-    setSearchResults(null)
-    const timer = window.setTimeout(() => {
-      const errors: string[] = []
-      void Promise.all(searchContextRef.current.sources.map(async ({ machine, snapshot }) => {
-        if (!snapshot) return []
-        const agentPages = await Promise.all(snapshot.agents.map(async (agent) => {
-          const page = await searchAgentNativeSessions(machine.config, agent, trimmed).catch((error: unknown) => {
-            errors.push(`${machine.name} / ${agent.label || agent.id}: ${error instanceof Error ? error.message : String(error)}`)
-            return { records: [] }
-          })
-          const projects = searchContextRef.current.projectsByMachine[machine.id] ?? []
-          return page.records.map((record) => ({
-            machine,
-            machineID: snapshot.machine.id,
-            record,
-            project: catalogProject(record, projects, snapshot.machine.id)
-          }))
-        }))
-        return agentPages.flat()
-      })).then((results) => {
-        if (cancelled) return
-        setSearchResults(results.flat())
-        setSearchError(errors.length ? errors.join("; ") : null)
-        setSearching(false)
-      }).catch((error: unknown) => {
-        if (cancelled) return
-        setSearchError(error instanceof Error ? error.message : String(error))
-        setSearching(false)
-      })
-    }, 250)
-
-    return () => {
-      cancelled = true
-      window.clearTimeout(timer)
-    }
-    // Machine snapshots and project catalogs poll frequently. Their new object identities must
-    // not cancel a search before its slowest harness can finish.
-  }, [query, machineSignature, refreshToken, authoritativeRefreshToken, searchRevision])
-
-  const effectiveRecords = useMemo(() => {
-    if (query.trim() && searchResults !== null) {
-      return uniqueSessionRecords([...searchResults, ...records])
-        .filter((item) => !deletedKeysRef.current?.has(recordKey(item)))
-    }
-    return records
-  }, [query, searchResults, records])
 
   const machineChoices = useMemo(() => sources.map(({ machine, snapshot }) => ({
     id: machine.id,
@@ -872,18 +920,24 @@ export function NativeSessionHome({
     onDiscoveredChange?.(loaded)
   }, [loaded, onDiscoveredChange])
 
-  const filteredGroups = useMemo(() => groups.flatMap((group) => {
-    const sessions = group.sessions.filter((item) => {
-      const projection = projectionForItem(item)
-      if (machineFilter && item.machine.id !== machineFilter) return false
-      if (agentFilter && item.record.agentId !== agentFilter) return false
-      if (projectFilter && projection.projectKey !== projectFilter) return false
-      if (modelFilter && projection.modelKey !== modelFilter) return false
-      if (filter !== "all" && projection.bucket !== filter) return false
-      return matchesFederatedSessionQuery(projection, query)
+  const filteredGroups = useMemo(() => {
+    const serverHitKeys = query.trim() && searchResults !== null
+      ? new Set(searchResults.map(recordKey))
+      : null
+    return groups.flatMap((group) => {
+      const sessions = group.sessions.filter((item) => {
+        const projection = projectionForItem(item)
+        if (machineFilter && item.machine.id !== machineFilter) return false
+        if (agentFilter && item.record.agentId !== agentFilter) return false
+        if (projectFilter && projection.projectKey !== projectFilter) return false
+        if (modelFilter && projection.modelKey !== modelFilter) return false
+        if (filter !== "all" && projection.bucket !== filter) return false
+        if (serverHitKeys?.has(recordKey(item))) return true
+        return matchesFederatedSessionQuery(projection, query)
+      })
+      return sessions.length ? [{ ...group, sessions }] : []
     })
-    return sessions.length ? [{ ...group, sessions }] : []
-  }), [agentFilter, filter, groups, machineFilter, modelFilter, projectFilter, projectionForItem, query])
+  }, [agentFilter, filter, groups, machineFilter, modelFilter, projectFilter, projectionForItem, query, searchResults])
 
   const machineGroups = useMemo(() => sources
     .filter(({ machine }) => !machineFilter || machine.id === machineFilter)
@@ -1000,10 +1054,20 @@ export function NativeSessionHome({
   useEffect(() => {
     if (!createOpen) return
     const available = selectedCreateMachine ? nativeCreateAgents(selectedCreateMachine.snapshot) : []
-    if (!available.some((agent) => agent.id === createAgentID)) setCreateAgentID(available[0]?.id || "")
-  }, [createAgentID, createOpen, selectedCreateMachine])
+    if (!available.some((agent) => agent.id === createAgentID)) {
+      const rememberedAgent = selectedCreateMachine && selectedCreateProject
+        ? loadProjectDefaultAgent(selectedCreateMachine.machine.id, selectedCreateProject.project.path)
+        : undefined
+      const preferred = rememberedAgent && available.some((agent) => agent.id === rememberedAgent)
+        ? rememberedAgent
+        : available[0]?.id || ""
+      setCreateAgentID(preferred)
+    }
+  }, [createAgentID, createOpen, selectedCreateMachine, selectedCreateProject])
 
   function open(item: RecordWithMachine) {
+    const key = recordKey(item)
+    setPinnedRecords((current) => current[key] === item ? current : { ...current, [key]: item })
     onOpen(nativeSessionSurfaceTarget(item.machineID, item.machine.config, item.record))
   }
 
@@ -1039,16 +1103,31 @@ export function NativeSessionHome({
     const projectContext = group ? projectCreateChoice(group, createMachines, projectsByMachine) : undefined
     if (group && !projectContext) return
     setCreateProjectContext(projectContext || null)
-    const selectedRecord = records.find((item) => recordKey(item) === selectedKey)
+    const selectedRecord = effectiveRecords.find((item) => recordKey(item) === selectedKey)
+      ?? (selectedKey ? pinnedRecords[selectedKey] : undefined)
     const preferredMachineID = createMachines.some(({ machine }) => machine.id === machineFilter)
       ? machineFilter
       : selectedRecord && createMachines.some(({ machine }) => machine.id === selectedRecord.machine.id)
         ? selectedRecord.machine.id
         : createMachines[0]?.machine.id || ""
-    setCreateMachineID(projectContext?.machine.id || preferredMachineID)
+    const resolvedMachineID = projectContext?.machine.id || preferredMachineID
+    const resolvedProjectPath = projectContext?.project.path
+      || (projectsByMachine[resolvedMachineID] || [])[0]?.path
+    const machineEntry = createMachines.find(({ machine }) => machine.id === resolvedMachineID)
+    const availableAgents = machineEntry ? nativeCreateAgents(machineEntry.snapshot) : []
+    const rememberedAgent = resolvedProjectPath
+      ? loadProjectDefaultAgent(resolvedMachineID, resolvedProjectPath)
+      : undefined
+    const recentProjectAgent = group?.sessions?.[0]?.record.agentId
+    const initialAgentID = (rememberedAgent && availableAgents.some((a) => a.id === rememberedAgent))
+      ? rememberedAgent
+      : (recentProjectAgent && availableAgents.some((a) => a.id === recentProjectAgent))
+        ? recentProjectAgent
+        : ""
+    setCreateMachineID(resolvedMachineID)
     setCreateProjectKey(projectContext?.key || "")
     setCreateTitle("")
-    setCreateAgentID("")
+    setCreateAgentID(initialAgentID)
     setCreateError(null)
     setCreateOpen(true)
   }
@@ -1087,6 +1166,11 @@ export function NativeSessionHome({
         ],
         { keepMissing: () => true }
       ))
+      saveProjectDefaultAgent(
+        selectedCreateMachine.machine.id,
+        selectedCreateProject.project.path,
+        selectedCreateAgent.id
+      )
       setCreateTitle("")
       setCreateOpen(false)
       onOpen(target)
@@ -1231,7 +1315,18 @@ export function NativeSessionHome({
           </label>
           <label>
             <span>{t("sf.project")}</span>
-            <select aria-label={t("sf.project")} value={selectedCreateProject?.key || createProjectContext?.key || ""} onChange={(event) => { setCreateProjectKey(event.target.value); setCreateError(null) }} disabled={creating || Boolean(createProjectContext) || createProjects.length === 0}>
+            <select aria-label={t("sf.project")} value={selectedCreateProject?.key || createProjectContext?.key || ""} onChange={(event) => {
+              const nextKey = event.target.value
+              setCreateProjectKey(nextKey)
+              const nextChoice = createProjects.find((choice) => choice.key === nextKey)
+              if (nextChoice && selectedCreateMachine) {
+                const remembered = loadProjectDefaultAgent(selectedCreateMachine.machine.id, nextChoice.project.path)
+                if (remembered && createAgents.some((agent) => agent.id === remembered)) {
+                  setCreateAgentID(remembered)
+                }
+              }
+              setCreateError(null)
+            }} disabled={creating || Boolean(createProjectContext) || createProjects.length === 0}>
               {createProjectContext && !selectedCreateProject ? <option value={createProjectContext.key}>{createProjectContext.project.name}</option> : null}
               {createProjects.map((choice) => <option value={choice.key} key={choice.key}>{choice.project.name}</option>)}
             </select>
@@ -1460,7 +1555,7 @@ export function NativeSessionHome({
         </div>
       ) : null}
 
-      {loaded && records.length > 0 && filteredGroups.length === 0 ? (
+      {loaded && (records.length > 0 || Boolean(query.trim())) && !searching && filteredGroups.length === 0 ? (
         <div className="hr-native-home-empty compact"><SearchIcon size={18} /><span>{t("sf.noMatch")}</span></div>
       ) : null}
 

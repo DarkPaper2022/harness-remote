@@ -50,7 +50,7 @@ test("opening a native Session updates selection and mobile detail explicitly", 
 })
 
 test("Session list navigation groups real native Sessions by machine and Project without activity-driven layout jumps", () => {
-  assert.match(home, /projectGroups\(records\)/)
+  assert.match(home, /projectGroups\(effectiveRecords\)/)
   assert.match(home, /reconcileStableSessionRecords\(current, freshRecords/)
   assert.match(home, /keepMissing: \(item\)/)
   assert.doesNotMatch(home, /selectedActivityAnchor/, "layout stability must apply to the whole rail rather than only the selected Session")

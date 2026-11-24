@@ -433,6 +433,7 @@ export class AcpService {
   #sessionListing
   #replaying = new Set()
   #historyLoader
+  #sessionIndex
   #ownedSessions = new Set()
   #adoptedSessions = new Set()
   #acpOpenSessions = new Set()
@@ -472,6 +473,7 @@ export class AcpService {
   constructor(acp, {
     snapshotDirectory,
     historyLoader,
+    sessionIndex,
     preserveListedTimestamps = false,
     reloadOnHistoryRefresh = true,
     replaySettleMs = 0,
@@ -507,6 +509,7 @@ export class AcpService {
     this.#acp = acp
     this.#snapshotDirectory = snapshotDirectory
     this.#historyLoader = historyLoader
+    this.#sessionIndex = sessionIndex ?? historyLoader
     this.#preserveListedTimestamps = preserveListedTimestamps
     this.#reloadOnHistoryRefresh = reloadOnHistoryRefresh
     this.#replaySettleMs = replaySettleMs
@@ -602,6 +605,13 @@ export class AcpService {
       this.#sessions.set(normalized.sessionId, normalized)
       return normalized
     })
+  }
+
+  /**
+   *Lightweight title overrides for any session renamed through this bridge (whether owned or not).
+   */
+  titleOverrides() {
+    return new Map(this.#titles)
   }
 
   async createSession({ directory, title, model }) {
@@ -760,7 +770,11 @@ export class AcpService {
       this.#actionStates.delete(sessionID)
       this.#authoritativeActionStates.delete(sessionID)
       this.#titles.delete(sessionID)
+      const previous = this.#sessions.get(sessionID)
       await this.#refreshSessions()
+      if (previous && this.#sessions.get(sessionID)?.title === previous.title) {
+        this.#sessions.set(sessionID, { ...this.#sessions.get(sessionID), title: normalized })
+      }
       const session = this.#sessions.get(sessionID)
       if (!session) throw new Error("Harness session not found after rename")
       this.#persistSnapshot(sessionID)
@@ -776,7 +790,11 @@ export class AcpService {
     if (await this.#nativeRenameAvailable(sessionID)) {
       await this.#sendNativeSessionName(sessionID, normalized)
       this.#titles.delete(sessionID)
+      const previous = this.#sessions.get(sessionID)
       await this.#refreshSessions()
+      if (previous && this.#sessions.get(sessionID)?.title === previous.title) {
+        this.#sessions.set(sessionID, { ...this.#sessions.get(sessionID), title: normalized })
+      }
       const session = this.#sessions.get(sessionID)
       if (!session) throw new Error("Harness session not found after rename")
       this.#persistSnapshot(sessionID)
@@ -874,12 +892,13 @@ export class AcpService {
     // deletion index instead of failing before the index can be written. This keeps DELETE
     // idempotent across upgrades without issuing any new ACP request.
     await this.#restoreDeletedSessionIndex()
-    await this.#refreshSessions()
+    await this.#restoreDeletedSessionIndex()
     await this.#restoreSnapshot(sessionID)
     if (this.#deletedSessions.has(sessionID)) {
       await this.#persistDeletedSessionIndex()
       return
     }
+    await this.#ensureKnownSession(sessionID)
     if (!this.#sessions.has(sessionID)) throw new Error("Harness session not found")
 
     if (this.#isBusy(sessionID)) this.abort(sessionID)
@@ -1108,6 +1127,13 @@ export class AcpService {
   async commands(sessionID) {
     if (sessionID) {
       if (await this.#readOnlyExternalMetadata(sessionID)) return []
+      // Opening a Session in the UI is strictly a read operation. Never spawn or `session/load` /
+      // `session/resume` an unopened journal-backed Session (such as PI or OMP) merely to list slash
+      // commands; doing so claimed PI's single writer on read. Return any cached command catalog instead.
+      if (this.#historyLoader && !this.#ownedSessions.has(sessionID) && !this.#acpOpenSessions.has(sessionID)) {
+        const catalogs = [...this.#commandCatalogs.values()]
+        return commandInfoList(catalogs.at(-1) ?? [])
+      }
       if (this.#acpOpenSessions.has(sessionID)) {
         const known = this.#commandCatalogs.get(sessionID)
         if (known) return commandInfoList(known)
@@ -1311,18 +1337,12 @@ export class AcpService {
    * still working is queued rather than rejected. It is recorded straight away, which
    * is what makes it visible in the conversation while it waits.
    */
-  async prompt(sessionID, text, model, attachments = [], variant) {
+  async prompt(sessionID, text, model, attachments = [], variant, delivery) {
     const end = this.#beginMutation(sessionID)
-    try { return await this.#prompt(sessionID, text, model, attachments, variant) } finally { end() }
+    try { return await this.#prompt(sessionID, text, model, attachments, variant, delivery) } finally { end() }
   }
 
-  async #prompt(sessionID, text, model, attachments = [], variant) {
-    // Refuse before touching the session: an agent that never advertised image support
-    // would reject the block mid-turn, which reads as a failed prompt rather than a
-    // rejected attachment.
-    if (attachments.length && !this.#acp.promptCapabilities?.image) {
-      throw new Error("This harness does not accept images")
-    }
+  async #prompt(sessionID, text, model, attachments = [], variant, delivery) {
     if (this.#historyLoader && !this.#ownedSessions.has(sessionID)) {
       this.#ownedSessions.add(sessionID)
       this.#loaded.delete(sessionID)
@@ -1335,11 +1355,16 @@ export class AcpService {
     } else {
       await this.#load(sessionID)
     }
+    // Check image capability after #load so per-session clients (like Codex SessionAcpClient)
+    // have completed ACP initialize and populated promptCapabilities before this check runs.
+    if (attachments.length && !this.#acp.promptCapabilities?.image) {
+      throw new Error("This harness does not accept images")
+    }
     this.#resetActionsForSessionChange(sessionID)
     if (this.#active.has(sessionID)) {
       const messageID = this.#recordPrompt(sessionID, text, attachments)
       this.#emit("session.updated", sessionID)
-      if (this.#acp.steeringSupported) {
+      if (delivery !== "queue" && this.#acp.steeringSupported) {
         try {
           const result = await this.#acp.request("_session/steering", {
             sessionId: sessionID,
@@ -1350,7 +1375,7 @@ export class AcpService {
           })
           if (result?.outcome === "injected" || result?.outcome === "startedNewTurn") {
             this.#persistSnapshot(sessionID)
-            return
+            return { delivery: "steered", outcome: result.outcome }
           }
         } catch {
           // Steering failed or not accepted; fall back to turn queue
@@ -1359,10 +1384,11 @@ export class AcpService {
       const queue = this.#queues.get(sessionID) ?? []
       queue.push({ text, model, messageID, attachments, variant })
       this.#queues.set(sessionID, queue)
-      return
+      return { delivery: "queued", queueLength: queue.length }
     }
     if (model) await this.setModel(sessionID, model, variant)
     this.#startTurn(sessionID, text, false, attachments)
+    return { delivery: "started" }
   }
 
   /** Start a prompt through the session service and resolve only when that turn becomes idle. */
@@ -1731,10 +1757,40 @@ export class AcpService {
     await this.#load(sessionID, true, true)
   }
 
+  async #ensureKnownSession(sessionID) {
+    if (this.#sessions.has(sessionID)) return true
+    if (typeof this.#sessionIndex?.listSessions === "function") {
+      try {
+        const indexed = await this.#sessionIndex.listSessions({ query: sessionID, limit: 20 })
+        if (indexed?.sessions?.length) {
+          this.rememberListedSessions(indexed.sessions)
+          if (this.#sessions.has(sessionID)) return true
+        }
+      } catch {
+        // Fall back to ACP session/list pagination below.
+      }
+    }
+    await this.#refreshSessions()
+    if (this.#sessions.has(sessionID)) return true
+    if (typeof this.#acp.listSessionPage === "function") {
+      let cursor
+      const seen = new Set()
+      for (let pageIndex = 0; pageIndex < 25; pageIndex += 1) {
+        const page = await this.#acp.listSessionPage(cursor)
+        if (page.sessions?.length) this.rememberListedSessions(page.sessions)
+        if (this.#sessions.has(sessionID)) return true
+        if (!page.nextCursor || seen.has(page.nextCursor)) break
+        seen.add(page.nextCursor)
+        cursor = page.nextCursor
+      }
+    }
+    return this.#sessions.has(sessionID)
+  }
+
   async #requireSession(sessionID) {
     await this.#restoreDeletedSessionIndex()
-    await this.#refreshSessions()
     await this.#restoreSnapshot(sessionID)
+    await this.#ensureKnownSession(sessionID)
     if (this.#deletedSessions.has(sessionID) || !this.#sessions.has(sessionID)) {
       throw new Error("Harness session not found")
     }
@@ -1746,7 +1802,7 @@ export class AcpService {
   }
 
   async #loadGuarded(sessionID, force = false, requireConfigOptions = false) {
-    if (!this.#sessions.has(sessionID)) await this.listSessions()
+    if (!this.#sessions.has(sessionID)) await this.#ensureKnownSession(sessionID)
     if (this.#deletedSessions.has(sessionID)) throw new Error("Harness session not found")
     const session = this.#sessions.get(sessionID)
     if (!session) throw new Error("Harness session not found")
@@ -1961,10 +2017,13 @@ export class AcpService {
     const messageID = randomUUID()
     const messages = this.#messages.get(sessionID) ?? []
     this.#messages.set(sessionID, messages)
+    // Recording a new user turn (including mid-turn live steering) ends the prior assistant
+    // message boundary so subsequent assistant chunks/tool calls attach after this user prompt.
+    this.#chunkMessageIDs.delete(`${sessionID}:assistant`)
     messages.push({
       info: { id: messageID, role: "user", sessionID, time: { created: Date.now() } },
       parts: [
-        { id: `${messageID}:text`, type: "text", text },
+        ...(text ? [{ id: `${messageID}:text`, type: "text", text }] : []),
         ...attachments.map((attachment, index) => ({
           id: `${messageID}:file:${index}`,
           type: "file",

@@ -4,6 +4,8 @@ import { ManagedEventFanout } from "./managed-event-fanout.js"
 import { inspectGitProjectIdentity } from "./project-identity.js"
 import { inspectGitProjectOutcome } from "./project-outcome.js"
 import { normalizeTaskModel } from "./task-model.js"
+import { createTerminalServer } from "./terminal-server.js"
+import { createWebUpdateServer } from "./web-update-server.js"
 
 const AGENT_ROUTE = /^\/v1\/agents\/([^/]+)(\/.*)?$/
 const TASK_WORKTREE_ROUTE = /^\/v1\/tasks\/([^/]+)\/worktree$/
@@ -119,6 +121,17 @@ function unsupportedOptionalRead(daemon, route, method) {
   return undefined
 }
 
+function rewriteOpenCodeRoute(route) {
+  if (route.path !== "/experimental/session" || !route.search) return route
+  const params = new URLSearchParams(route.search)
+  const q = params.get("q")?.trim()
+  if (q && !params.has("search")) {
+    params.set("search", q)
+    return { ...route, search: `?${params.toString()}` }
+  }
+  return route
+}
+
 export function proxyManagedHttpRequest({
   request,
   response,
@@ -127,6 +140,7 @@ export function proxyManagedHttpRequest({
   requestImpl = http.request,
   timeoutMs = DEFAULT_PROXY_TIMEOUT_MS
 }) {
+  route = rewriteOpenCodeRoute(route)
   return new Promise((resolve, reject) => {
     let upstreamResponse
     let settled = false
@@ -212,6 +226,8 @@ export function createAgentRoutingServer({
   projectOutcome = inspectGitProjectOutcome,
   worktreeManager,
   diagnostics,
+  dynamicRoots,
+  webDistDir,
   createServer = http.createServer,
   proxyRequest = proxyManagedHttpRequest
 }) {
@@ -451,5 +467,16 @@ export function createAgentRoutingServer({
     for (const fanout of eventFanouts.values()) fanout.close()
     eventFanouts.clear()
   })
-  return server
+  const terminalServer = createTerminalServer({
+    innerServer: server,
+    config,
+    dynamicRoots,
+    createServer
+  })
+  return createWebUpdateServer({
+    innerServer: terminalServer,
+    config,
+    webDistDir: webDistDir ?? config?.webDistDir,
+    createServer
+  })
 }

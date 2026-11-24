@@ -276,6 +276,35 @@ function modelWireName(model?: ModelSelection) {
   return `${model.providerID}/${model.modelID}`
 }
 
+export type WorkspaceTerminalSummary = {
+  id: string
+  title: string
+  directory: string
+  shell: string
+  pty: boolean
+  pid: number | null
+  cols: number
+  rows: number
+  status: "running" | "exited"
+  exitCode: number | null
+  createdAt: number
+  updatedAt: number
+  lastSeq: number
+}
+
+export type WorkspaceTerminalChunk = {
+  seq: number
+  data: string
+  timestamp: number
+}
+
+export type WorkspaceTerminalPollResponse = {
+  terminal: WorkspaceTerminalSummary
+  chunks: WorkspaceTerminalChunk[]
+  nextSeq: number
+  reset: boolean
+}
+
 export const api = {
   eventStream(config: ServerConfig) {
     const headers: Record<string, string> = { ...routingHeaders(config) }
@@ -295,25 +324,29 @@ export const api = {
     return request<Session[]>(config, withDirectory("/session", directory))
   },
 
-  async listGlobalSessionPage(config: ServerConfig, cursor?: string, query?: string): Promise<SessionPage> {
+  async listGlobalSessionPage(config: ServerConfig, cursor?: string, query?: string, allHistory = false): Promise<SessionPage> {
     const params = new URLSearchParams()
     if (cursor) params.set("cursor", cursor)
     if (query && query.trim()) params.set("q", query.trim())
+    if (allHistory) params.set("all", "1")
     const qs = params.toString()
     const path = qs ? `/experimental/session?${qs}` : "/experimental/session"
     const response = await requestWithHeaders<Session[]>(config, path)
+    if (!Array.isArray(response.data)) {
+      throw new Error(`Unexpected non-JSON session listing response from ${config.backend}`)
+    }
     return {
       sessions: response.data,
       ...(response.headers["x-next-cursor"] ? { nextCursor: response.headers["x-next-cursor"] } : {})
     }
   },
 
-  async listGlobalSessions(config: ServerConfig) {
+  async listGlobalSessions(config: ServerConfig, allHistory = false) {
     const sessions: Session[] = []
     let cursor: string | undefined
     const seenCursors = new Set<string>()
     do {
-      const page = await api.listGlobalSessionPage(config, cursor)
+      const page = await api.listGlobalSessionPage(config, cursor, undefined, allHistory)
       sessions.push(...page.sessions)
       if (page.nextCursor && seenCursors.has(page.nextCursor)) {
         throw new Error("Session listing returned the same pagination cursor twice.")
@@ -534,6 +567,82 @@ export const api = {
     return request<boolean>(config, withDirectory(`/permission/${requestID}/reply`, directory), {
       method: "POST",
       body: { reply }
+    })
+  },
+
+  checkWebUpdateManifest(config: ServerConfig) {
+    const machineConfig: ServerConfig = { ...config, agentId: undefined }
+    return request<{
+      available: boolean
+      version?: string
+      bundleId?: string
+      bundleHash?: string
+      totalBytes?: number
+      files?: Array<{ path: string; size: number; sha256: string }>
+    }>(machineConfig, "/v1/web-update/manifest")
+  },
+
+  downloadWebUpdateFile(config: ServerConfig, assetPath: string) {
+    const machineConfig: ServerConfig = { ...config, agentId: undefined }
+    const params = new URLSearchParams({ path: assetPath })
+    return request<{
+      path: string
+      size: number
+      sha256: string
+      base64: string
+    }>(machineConfig, `/v1/web-update/file?${params.toString()}`, { readTimeout: 60_000 })
+  },
+
+  listTerminals(config: ServerConfig, directory?: string) {
+    const machineConfig: ServerConfig = { ...config, agentId: undefined }
+    return request<{ terminals: WorkspaceTerminalSummary[] }>(
+      machineConfig,
+      withDirectory("/v1/terminals", directory)
+    )
+  },
+
+  createTerminal(config: ServerConfig, options: { directory: string; title?: string; cols?: number; rows?: number; command?: string }) {
+    const machineConfig: ServerConfig = { ...config, agentId: undefined }
+    return request<WorkspaceTerminalPollResponse>(machineConfig, "/v1/terminals", {
+      method: "POST",
+      body: options
+    })
+  },
+
+  pollTerminal(config: ServerConfig, id: string, since = 0, waitMs = 0) {
+    const machineConfig: ServerConfig = { ...config, agentId: undefined }
+    const params = new URLSearchParams({
+      since: String(Math.max(0, Math.trunc(since) || 0)),
+      waitMs: String(Math.max(0, Math.trunc(waitMs) || 0))
+    })
+    return request<WorkspaceTerminalPollResponse>(
+      machineConfig,
+      `/v1/terminals/${encodeURIComponent(id)}?${params.toString()}`,
+      { readTimeout: Math.max(20_000, waitMs + 8_000) }
+    )
+  },
+
+  writeTerminal(config: ServerConfig, id: string, data: string) {
+    const machineConfig: ServerConfig = { ...config, agentId: undefined }
+    return request<{ ok: boolean }>(machineConfig, `/v1/terminals/${encodeURIComponent(id)}/write`, {
+      method: "POST",
+      body: { data }
+    })
+  },
+
+  resizeTerminal(config: ServerConfig, id: string, cols: number, rows: number) {
+    const machineConfig: ServerConfig = { ...config, agentId: undefined }
+    return request<{ ok: boolean; terminal: WorkspaceTerminalSummary }>(
+      machineConfig,
+      `/v1/terminals/${encodeURIComponent(id)}/resize`,
+      { method: "POST", body: { cols, rows } }
+    )
+  },
+
+  closeTerminal(config: ServerConfig, id: string) {
+    const machineConfig: ServerConfig = { ...config, agentId: undefined }
+    return request<{ ok: boolean }>(machineConfig, `/v1/terminals/${encodeURIComponent(id)}`, {
+      method: "DELETE"
     })
   }
 }

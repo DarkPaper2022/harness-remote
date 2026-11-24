@@ -31,6 +31,7 @@ import { LoadingIcon } from "../Icons"
 import { CrossMachineContinuePanel } from "./cross-machine-continue-panel"
 import { NativeSessionLineagePanel } from "./native-session-lineage-panel"
 import { NativeSessionOutcomePanel } from "./native-session-outcome-panel"
+import { SideChatDrawer, type SideChatLaunchState } from "./side-chat-drawer"
 import { WorkThreadConversation } from "./work-thread-conversation"
 import "../native-session-observer.css"
 
@@ -44,6 +45,8 @@ type Props = {
   interactionEnabled?: boolean
   /** A Session-scoped request discovered a transport outage before the machine poll did. */
   onConnectionIssue?: () => void
+  onToggleTerminal?: () => void
+  terminalOpen?: boolean
 }
 export type NativeSessionVisualState = "working" | "attention" | "stopped" | "ready"
 
@@ -163,13 +166,18 @@ export function NativeSessionObserver({
   onSessionRefresh,
   onStateChange,
   interactionEnabled = true,
-  onConnectionIssue
+  onConnectionIssue,
+  onToggleTerminal,
+  terminalOpen = false
 }: Props) {
   const [conversation, setConversation] = useState<ConversationRuntime | null>(null)
   const [controller, setController] = useState<ConversationController | null>(null)
   const [transcriptRefreshToken, setTranscriptRefreshToken] = useState(0)
   const [attachmentsSupported, setAttachmentsSupported] = useState(false)
+  const [steeringSupported, setSteeringSupported] = useState(false)
   const [commands, setCommands] = useState<CommandInfo[]>([])
+  const [sideChatLaunch, setSideChatLaunch] = useState<SideChatLaunchState | null>(null)
+  const [latestMessagesForSideChat, setLatestMessagesForSideChat] = useState<MessageEnvelope[]>([])
   const conversationRef = useRef<ConversationRuntime | null>(null)
   const durableLifecycleRef = useRef<{ targetKey: string; status: string } | null>(null)
   const attentionRef = useRef(false)
@@ -276,11 +284,13 @@ export function NativeSessionObserver({
     if (!interactionEnabled) return
     let disposed = false
     setAttachmentsSupported(false)
+    setSteeringSupported(false)
     setCommands([])
     void api.capabilities(target.config)
       .then(async (capabilities) => {
         if (disposed) return
         setAttachmentsSupported(capabilities.attachments === true)
+        setSteeringSupported(capabilities.steering === true)
         if (target.commandsSupported === true || capabilities.commands === true) {
           try {
             const available = await api.listCommands(target.config, target.sessionID)
@@ -293,11 +303,21 @@ export function NativeSessionObserver({
       .catch(() => {
         if (!disposed) {
           setAttachmentsSupported(false)
+          setSteeringSupported(false)
           setCommands([])
         }
       })
     return () => { disposed = true }
   }, [target.key, target.config.host, target.config.port, target.config.agentId, interactionEnabled])
+
+  const augmentedCommands = useMemo<CommandInfo[]>(() => {
+    const builtIns: CommandInfo[] = [
+      { name: "btw", description: "Ask a side question in a temporary side chat without interrupting this session" },
+      { name: "side", description: "Alias for /btw side chat" }
+    ]
+    const seen = new Set(builtIns.map((cmd) => cmd.name))
+    return [...builtIns, ...commands.filter((cmd) => !seen.has(cmd.name.toLowerCase()))]
+  }, [commands])
 
   const agent = useMemo<MachineAgentHost>(() => ({
     id: target.agentID,
@@ -312,9 +332,10 @@ export function NativeSessionObserver({
       abort: target.canStop,
       models: target.modelsSupported,
       attachments: attachmentsSupported,
-      commands: commands.length > 0
+      commands: augmentedCommands.length > 0,
+      steering: steeringSupported
     }
-  }), [target.agentID, target.agentLabel, target.backend, target.transport, target.canStop, target.modelsSupported, attachmentsSupported, commands.length])
+  }), [target.agentID, target.agentLabel, target.backend, target.transport, target.canStop, target.modelsSupported, attachmentsSupported, augmentedCommands.length, steeringSupported])
 
   const routableRoutes = useMemo<NativeSessionRouteMachine[]>(() => routes.flatMap((machine) => {
     const available = machine.agents.filter((candidate) => canCreateNativeSession(candidate))
@@ -440,26 +461,44 @@ export function NativeSessionObserver({
         </div>
       ) : null}
 
-      <WorkThreadConversation
-        key={target.key}
-        conversation={presentedConversation}
-        baseConfig={target.config}
-        agents={[agent]}
-        modelScope={NATIVE_SESSION_MODEL_SCOPE}
-        deferModelFallback
-        controller={controller}
-        transcriptRefreshToken={transcriptRefreshToken}
-        onConversationUpdate={handleConversationUpdate}
-        onAttentionChange={handleAttentionChange}
-        commands={commands}
-        interactionEnabled={interactionEnabled}
-        onConnectionIssue={onConnectionIssue}
-        routing={onOpenSession && sameMachineRoutes.length ? {
-          currentMachineID: target.machineID,
-          machines: sameMachineRoutes,
-          onContinue: handleRoutedContinue
-        } : undefined}
-      />
+      <div className={`hr-observer-conversation-split${sideChatLaunch ? " has-side-chat" : ""}`}>
+        <WorkThreadConversation
+          key={target.key}
+          conversation={presentedConversation}
+          baseConfig={target.config}
+          agents={[agent]}
+          modelScope={NATIVE_SESSION_MODEL_SCOPE}
+          deferModelFallback
+          controller={controller}
+          transcriptRefreshToken={transcriptRefreshToken}
+          onConversationUpdate={handleConversationUpdate}
+          onAttentionChange={handleAttentionChange}
+          commands={augmentedCommands}
+          interactionEnabled={interactionEnabled}
+          onConnectionIssue={onConnectionIssue}
+          allowActiveTurnSend
+          steeringSupported={steeringSupported}
+          onStartSideChat={(question, model, snapshotMessages) => {
+            setLatestMessagesForSideChat(snapshotMessages)
+            setSideChatLaunch({ initialQuestion: question, model })
+          }}
+          onToggleTerminal={onToggleTerminal}
+          terminalOpen={terminalOpen}
+          routing={onOpenSession && sameMachineRoutes.length ? {
+            currentMachineID: target.machineID,
+            machines: sameMachineRoutes,
+            onContinue: handleRoutedContinue
+          } : undefined}
+        />
+        {sideChatLaunch ? (
+          <SideChatDrawer
+            parentTarget={target}
+            parentMessages={latestMessagesForSideChat}
+            launchState={sideChatLaunch}
+            onClose={() => setSideChatLaunch(null)}
+          />
+        ) : null}
+      </div>
     </div>
   )
 }

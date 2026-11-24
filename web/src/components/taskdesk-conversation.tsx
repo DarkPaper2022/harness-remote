@@ -1,4 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react"
+import { loadLanguage } from "../appPreferences"
 import { ATTACHMENT_MAX_COUNT, fileToAttachment, type AttachmentPart } from "../attachments"
 import type { CommandInfo, MessageEnvelope } from "../types"
 import { AlertIcon, ChatIcon, CloseIcon, JumpToBottomIcon, JumpToTopIcon, LoadingIcon, PaperclipIcon, StopCircleIcon } from "../Icons"
@@ -44,13 +45,21 @@ type Props = {
   attachmentsSupported?: boolean
   onAttachmentsChange?: (attachments: AttachmentPart[]) => void
   onAttachmentError?: (message: string) => void
-  onSend: () => Promise<void> | void
+  onSend: (deliveryOverride?: "steer" | "queue") => Promise<void> | void
   sending?: boolean
   sendDisabled?: boolean
   /** Disable editing as well as Send while the owning Session is not safely writable yet. */
   composerDisabled?: boolean
   onStop?: () => Promise<void> | void
   stopping?: boolean
+  /** Allow sending while `waiting` is true (T3-style live steering or turn queueing). */
+  allowActiveTurnSend?: boolean
+  activeTurnMode?: "steer" | "queue"
+  steeringSupported?: boolean
+  onToggleActiveTurnMode?: () => void
+  onOpenSideChat?: () => void
+  onOpenTerminal?: () => void
+  terminalOpen?: boolean
   workingLabel?: string
   showWaitingIndicator?: boolean
   placeholder?: string
@@ -185,13 +194,30 @@ const ConversationTranscript = memo(function ConversationTranscript({
   const followFrameRef = useRef<number | undefined>(undefined)
   const scrollFrameRef = useRef<number | undefined>(undefined)
   const previousSendingRef = useRef(false)
+  const previousBusyRef = useRef(false)
   const [jumpAffordances, setJumpAffordances] = useState<JumpAffordances>({ top: false, bottom: false })
+  const [awayFromBottom, setAwayFromBottom] = useState(false)
+  const [unreadCompleted, setUnreadCompleted] = useState(false)
+  const isZh = loadLanguage().startsWith("zh")
   loadOlderRef.current = onLoadOlder
 
   function refreshJumpAffordances(element: HTMLElement) {
     const next = jumpAffordancesFor(element)
     setJumpAffordances((current) => current.top === next.top && current.bottom === next.bottom ? current : next)
+    const isNear = element.scrollHeight - element.scrollTop - element.clientHeight <= NEAR_BOTTOM_PX
+    setAwayFromBottom(!isNear)
+    if (isNear) setUnreadCompleted(false)
   }
+
+  useEffect(() => {
+    const busy = Boolean(waiting || sending)
+    if (!previousBusyRef.current && busy) {
+      setUnreadCompleted(false)
+    } else if (previousBusyRef.current && !busy && !nearBottomRef.current) {
+      setUnreadCompleted(true)
+    }
+    previousBusyRef.current = busy
+  }, [waiting, sending])
 
   useEffect(() => () => {
     if (followFrameRef.current !== undefined) window.cancelAnimationFrame(followFrameRef.current)
@@ -282,6 +308,7 @@ const ConversationTranscript = memo(function ConversationTranscript({
     const current = transcriptRef.current
     if (!current) return
     nearBottomRef.current = false
+    setAwayFromBottom(true)
     current.scrollTo({ top: 0, behavior: "smooth" })
   }
 
@@ -289,6 +316,8 @@ const ConversationTranscript = memo(function ConversationTranscript({
     const current = transcriptRef.current
     if (!current) return
     nearBottomRef.current = true
+    setAwayFromBottom(false)
+    setUnreadCompleted(false)
     current.scrollTo({ top: current.scrollHeight, behavior: "smooth" })
   }
 
@@ -350,6 +379,24 @@ const ConversationTranscript = memo(function ConversationTranscript({
         {sending || (waiting && showWaitingIndicator) ? <ThinkingIndicator agentLabel={agentLabel} agentBackend={agentBackend} workingLabel={workingLabel} /> : null}
       </div>
 
+      {awayFromBottom && (waiting || sending || unreadCompleted) ? (
+        <div className="uw-live-tail-banner">
+          <button
+            type="button"
+            className={`uw-live-tail-pill${waiting || sending ? " streaming" : " completed"}`}
+            onClick={jumpToBottom}
+          >
+            <i className="uw-live-tail-dot" aria-hidden="true" />
+            <span>
+              {waiting || sending
+                ? (isZh ? `${agentLabel} 正在输出 · 点击回底跟随` : `${agentLabel} is streaming · Follow live`)
+                : (isZh ? "回复已完成 · 点击查看最新内容" : "Reply completed · View latest")}
+            </span>
+            <b aria-hidden="true">↓</b>
+          </button>
+        </div>
+      ) : null}
+
       {jumpAffordances.top || jumpAffordances.bottom ? (
         <div className="uw-transcript-jumps" aria-label="Conversation navigation">
           {jumpAffordances.top ? (
@@ -396,6 +443,13 @@ export function TaskDeskConversation({
   composerDisabled = false,
   onStop,
   stopping = false,
+  allowActiveTurnSend = false,
+  activeTurnMode = "steer",
+  steeringSupported = false,
+  onToggleActiveTurnMode,
+  onOpenSideChat,
+  onOpenTerminal,
+  terminalOpen = false,
   workingLabel,
   showWaitingIndicator = true,
   placeholder,
@@ -419,7 +473,16 @@ export function TaskDeskConversation({
       .filter((command) => command.name.toLowerCase().includes(query) || (command.description || "").toLowerCase().includes(query))
       .slice(0, 8)
   }, [commands, commandMenuOpen, commandToken])
-  const canSend = Boolean(draft.trim() && !sending && !waiting && !sendDisabled && !composerDisabled && ready)
+  const hasSendableInput = Boolean(draft.trim() || attachments.length > 0)
+  const isSideCommand = /^\s*\/(?:btw|side)(?:\s|$)/i.test(draft)
+  const canSend = Boolean(
+    hasSendableInput
+    && !sending
+    && (!waiting || allowActiveTurnSend || isSideCommand)
+    && !sendDisabled
+    && !composerDisabled
+    && ready
+  )
   // A phone has no Ctrl or Cmd key, so telling a touch user to press Ctrl/Cmd+Enter named the one
   // way to send that they do not have. Enter inserts a newline there; the Send button is the action.
   const hint = footerHint ?? (touchFirst ? "Enter adds a line. Tap Send to send." : "Enter to send · Shift+Enter for a newline")
@@ -471,11 +534,17 @@ export function TaskDeskConversation({
     if (event.key !== "Enter") return
     if (touchFirst) {
       if (!event.ctrlKey && !event.metaKey) return
-    } else if (event.shiftKey) {
+    } else if (event.shiftKey && !event.ctrlKey && !event.metaKey) {
       return
     }
     event.preventDefault()
-    if (canSend) void onSend()
+    if (canSend) {
+      const alternate = waiting && (event.ctrlKey || event.metaKey) && event.shiftKey
+      const override = alternate
+        ? (activeTurnMode === "steer" ? "queue" : "steer")
+        : undefined
+      void onSend(override)
+    }
   }
 
   return (
@@ -543,7 +612,11 @@ export function TaskDeskConversation({
           value={draft}
           onChange={(event) => onDraftChange(event.target.value)}
           onKeyDown={onComposerKeyDown}
-          placeholder={waiting ? `${agentLabel} is working…` : placeholder || `Continue with ${agentLabel}…`}
+          placeholder={waiting
+            ? (allowActiveTurnSend
+              ? `${agentLabel} is working… Type to ${steeringSupported && activeTurnMode === "steer" ? "steer" : "queue"} or /btw for a side question`
+              : `${agentLabel} is working…`)
+            : placeholder || `Continue with ${agentLabel}…`}
           rows={3}
           enterKeyHint={touchFirst ? "enter" : "send"}
           disabled={!ready || composerDisabled}
@@ -551,8 +624,45 @@ export function TaskDeskConversation({
           aria-describedby="uw-composer-hint"
         />
         <div className="uw-composer-footer">
-          <span className="uw-composer-directory">{directory || ""}</span>
-          <div>
+          <div className="uw-composer-quick-tools">
+            <span className="uw-composer-directory">{directory || ""}</span>
+            {commands.length > 0 ? (
+              <button
+                type="button"
+                className="uw-composer-chip"
+                disabled={!ready || composerDisabled}
+                onClick={() => {
+                  onDraftChange(draft.startsWith("/") ? draft : `/${draft}`)
+                  window.requestAnimationFrame(() => composerRef.current?.focus())
+                }}
+                title="Slash commands (/)"
+              >
+                /
+              </button>
+            ) : null}
+            {onOpenSideChat ? (
+              <button
+                type="button"
+                className="uw-composer-chip"
+                disabled={!ready || composerDisabled}
+                onClick={onOpenSideChat}
+                title="Ask a side question without interrupting the main session (/btw)"
+              >
+                /btw
+              </button>
+            ) : null}
+            {onOpenTerminal ? (
+              <button
+                type="button"
+                className={`uw-composer-chip${terminalOpen ? " active" : ""}`}
+                onClick={onOpenTerminal}
+                title="Toggle workspace terminal"
+              >
+                &gt;_ Terminal
+              </button>
+            ) : null}
+          </div>
+          <div className="uw-composer-actions">
             {attachmentsSupported ? (
               <>
                 <input
@@ -577,7 +687,7 @@ export function TaskDeskConversation({
                 <button
                   type="button"
                   className="uw-button"
-                  disabled={!ready || composerDisabled || sending || waiting || attachments.length >= ATTACHMENT_MAX_COUNT}
+                  disabled={!ready || composerDisabled || sending || (!allowActiveTurnSend && waiting) || attachments.length >= ATTACHMENT_MAX_COUNT}
                   onClick={() => attachmentInputRef.current?.click()}
                   aria-label="Attach image"
                   title="Attach image"
@@ -587,6 +697,16 @@ export function TaskDeskConversation({
               </>
             ) : null}
             <small id="uw-composer-hint">{hint}</small>
+            {waiting && allowActiveTurnSend && steeringSupported && onToggleActiveTurnMode ? (
+              <button
+                type="button"
+                className="uw-composer-mode-pill"
+                onClick={onToggleActiveTurnMode}
+                title="Switch active-turn follow-up mode between live Steer and Queue (Ctrl/Cmd+Shift+Enter sends opposite)"
+              >
+                {activeTurnMode === "steer" ? "插话 Steer" : "排队 Queue"}
+              </button>
+            ) : null}
             {waiting && onStop ? (
               <button
                 type="button"
@@ -598,18 +718,27 @@ export function TaskDeskConversation({
                 {stopping ? <LoadingIcon size={15} /> : <StopCircleIcon size={15} />}
                 <span className="uw-button-label">{stopping ? "Stopping" : "Stop"}</span>
               </button>
-            ) : (
+            ) : null}
+            {(!waiting || !onStop || hasSendableInput || allowActiveTurnSend) ? (
               <button
                 type="button"
                 className="uw-button uw-button-primary"
                 disabled={!canSend}
                 onClick={() => void onSend()}
-                aria-label={sending ? "Sending" : "Send"}
+                aria-label={sending ? "Sending" : waiting && !isSideCommand ? (steeringSupported && activeTurnMode === "steer" ? "Steer" : "Queue") : "Send"}
               >
                 {sending ? <LoadingIcon size={15} /> : "↑"}
-                <span className="uw-button-label">{sending ? "Sending" : "Send"}</span>
+                <span className="uw-button-label">
+                  {sending
+                    ? "Sending"
+                    : isSideCommand
+                      ? "Side /btw"
+                      : waiting
+                        ? (steeringSupported && activeTurnMode === "steer" ? "Steer" : "Queue")
+                        : "Send"}
+                </span>
               </button>
-            )}
+            ) : null}
           </div>
         </div>
       </div>

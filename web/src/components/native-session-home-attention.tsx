@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ComponentProps } from "react"
 import { notifyDesktopAttention, subscribeDesktopAttentionActivation } from "../desktopBridge"
-import { discoverAgentNativeSessionPage, nativeSessionSurfaceTarget, type NativeSessionSurfaceTarget } from "../native-session-discovery"
+import { discoverAgentNativeSessionPage, nativeSessionSurfaceTarget, searchAgentNativeSessions, type NativeSessionSurfaceTarget } from "../native-session-discovery"
 import { loadNativeSessionAttentionIndex, type NativeSessionAttentionIndex, type NativeSessionAttentionIndexItem } from "../native-session-attention-index"
 import { startNativeSessionAttentionLiveRefresh, type NativeSessionAttentionLiveTarget } from "../native-session-attention-live"
 import { desktopAttentionNotification, type NativeSessionAttentionNotificationContext } from "../native-session-attention-notification-presentation"
@@ -224,6 +224,18 @@ export function NativeSessionHome(props: Props) {
     setOpeningKey(key)
     setOpenError(null)
     try {
+      const searched = await searchAgentNativeSessions(target.baseConfig, target.agent, sessionID).catch(() => ({ records: [] }))
+      const directRecord = searched.records.find((candidate) => candidate.session.id === sessionID)
+      if (directRecord) {
+        const surface = nativeSessionSurfaceTarget(target.machineID, target.baseConfig, directRecord)
+        const projectLabel = directRecord.session.project?.name?.trim()
+        notificationContextRef.current.set(key, {
+          sessionTitle: surface.title,
+          ...(projectLabel ? { projectLabel } : {})
+        })
+        rememberAndOpen(surface)
+        return
+      }
       let cursor: string | undefined
       const seen = new Set<string>()
       for (;;) {

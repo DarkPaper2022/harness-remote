@@ -24,41 +24,50 @@ export function parseAgyTimestampMs(value) {
     .replace(/^(\d{4}-\d{2}-\d{2})\s+/, "$1T")
     .replace(/(\.\d{3})\d+/, "$1")
   const parsed = Date.parse(normalized)
-  return Number.isFinite(parsed) ? parsed : undefined
+  if (!Number.isFinite(parsed)) return undefined
+  // Go's zero `time.Time` (`0001-01-01 00:00:00+00:00`) parses as negative epoch ms; clamp to 0 so
+  // cursor tokens remain non-negative and zero-time sessions never look freshly updated.
+  return parsed > 0 ? parsed : 0
 }
 
-export function firstWorkspaceDirectory(workspaceUris) {
-  if (typeof workspaceUris !== "string" || !workspaceUris.trim()) return undefined
+export function allWorkspaceDirectories(workspaceUris) {
+  if (typeof workspaceUris !== "string" || !workspaceUris.trim()) return []
   let parsed
   try {
     parsed = JSON.parse(workspaceUris)
   } catch {
-    return undefined
+    return []
   }
-  if (!Array.isArray(parsed)) return undefined
+  if (!Array.isArray(parsed)) return []
+  const directories = []
   for (const entry of parsed) {
     if (typeof entry !== "string" || !entry.trim()) continue
     if (entry.startsWith("file://")) {
       try {
-        return fileURLToPath(entry)
+        directories.push(fileURLToPath(entry))
       } catch {
         continue
       }
+      continue
     }
-    if (path.isAbsolute(entry)) return entry
+    if (path.isAbsolute(entry)) directories.push(entry)
   }
-  return undefined
+  return directories
+}
+
+export function firstWorkspaceDirectory(workspaceUris) {
+  return allWorkspaceDirectories(workspaceUris)[0]
 }
 
 function decodeAgyListCursor(cursor) {
   if (typeof cursor !== "string" || !cursor.startsWith(AGY_LIST_CURSOR_PREFIX)) return undefined
-  const match = /^(\d+):(.+)$/.exec(cursor.slice(AGY_LIST_CURSOR_PREFIX.length))
+  const match = /^(-?\d+):(.+)$/.exec(cursor.slice(AGY_LIST_CURSOR_PREFIX.length))
   if (!match) return undefined
   const updatedAtMs = Number(match[1])
-  if (!Number.isSafeInteger(updatedAtMs) || updatedAtMs < 0) return undefined
+  if (!Number.isSafeInteger(updatedAtMs)) return undefined
   try {
     const id = decodeURIComponent(match[2])
-    return id ? { updatedAtMs, id } : undefined
+    return id ? { updatedAtMs: Math.max(0, updatedAtMs), id } : undefined
   } catch {
     return undefined
   }
@@ -138,13 +147,14 @@ export function createAgySessionIndex({
     try {
       database = new sqlite.DatabaseSync(databaseFile, { readOnly: true })
       const conditions = ["conversation_id IS NOT NULL", "conversation_id <> ''"]
-      if (columns.has("killed")) conditions.push("killed = 0")
-      if (columns.has("parent_conversation_id")) conditions.push("parent_conversation_id = ''")
-      if (columns.has("nesting_depth")) conditions.push("nesting_depth = 0")
+      if (columns.has("killed")) conditions.push("COALESCE(killed, 0) = 0")
+      if (columns.has("parent_conversation_id")) conditions.push("COALESCE(parent_conversation_id, '') = ''")
+      if (columns.has("nesting_depth")) conditions.push("COALESCE(nesting_depth, 0) = 0")
       const previewExpr = columns.has("preview") ? "COALESCE(NULLIF(title, ''), preview, '')" : "COALESCE(title, '')"
+      const rawPreviewExpr = columns.has("preview") ? "COALESCE(preview, '')" : "''"
       return database
         .prepare(
-          `SELECT conversation_id AS id, ${previewExpr} AS title, last_modified_time AS lastModified, workspace_uris AS workspaceUris
+          `SELECT conversation_id AS id, ${previewExpr} AS title, ${rawPreviewExpr} AS preview, last_modified_time AS lastModified, workspace_uris AS workspaceUris
            FROM conversation_summaries
            WHERE ${conditions.join(" AND ")}
            ORDER BY last_modified_time DESC, conversation_id DESC`
@@ -173,11 +183,16 @@ export function createAgySessionIndex({
         if (storedIDs && !storedIDs.has(row.id)) continue
         const updatedAtMs = parseAgyTimestampMs(row.lastModified) ?? 0
         if (cutoff && updatedAtMs < cutoff) continue
-        const cwd = firstWorkspaceDirectory(row.workspaceUris) ?? standaloneScratchDir
+        const workspaces = allWorkspaceDirectories(row.workspaceUris)
+        const cwd = workspaces[0] ?? standaloneScratchDir
         const title = typeof row.title === "string" ? row.title.trim() : ""
+        const preview = typeof row.preview === "string" ? row.preview.trim() : ""
+        const searchText = [title, preview, ...workspaces].filter(Boolean).join("\n")
         if (lowerQuery) {
           const hit = title.toLowerCase().includes(lowerQuery)
+            || preview.toLowerCase().includes(lowerQuery)
             || cwd.toLowerCase().includes(lowerQuery)
+            || workspaces.some((ws) => ws.toLowerCase().includes(lowerQuery))
             || String(row.id).toLowerCase().includes(lowerQuery)
           if (!hit) continue
         }
@@ -185,13 +200,15 @@ export function createAgySessionIndex({
           id: String(row.id),
           cwd,
           title: title || null,
+          ...(searchText ? { searchText } : {}),
           updatedAtMs,
-          updatedAt: updatedAtMs > 0 ? new Date(updatedAtMs).toISOString() : undefined
+          updatedAt: updatedAtMs > 0 ? new Date(updatedAtMs).toISOString() : "1970-01-01T00:00:00.000Z"
         })
       }
 
+      const compareDescId = (leftId, rightId) => (rightId < leftId ? -1 : rightId > leftId ? 1 : 0)
       matching.sort((left, right) =>
-        right.updatedAtMs - left.updatedAtMs || right.id.localeCompare(left.id)
+        right.updatedAtMs - left.updatedAtMs || compareDescId(left.id, right.id)
       )
 
       const filtered = before
@@ -205,10 +222,11 @@ export function createAgySessionIndex({
       const page = hasMore ? filtered.slice(0, boundedLimit) : filtered
       const last = page.at(-1)
       return {
-        sessions: page.map(({ id, cwd, title, updatedAt }) => ({
+        sessions: page.map(({ id, cwd, title, searchText, updatedAt }) => ({
           sessionId: id,
           cwd,
           title,
+          ...(searchText ? { searchText } : {}),
           updatedAt
         })),
         ...(hasMore && last
@@ -226,8 +244,9 @@ export function createAgySessionIndex({
         if (storedIDs && !storedIDs.has(row.id)) continue
         const updatedAtMs = parseAgyTimestampMs(row.lastModified) ?? 0
         if (cutoff && updatedAtMs < cutoff) continue
-        const cwd = firstWorkspaceDirectory(row.workspaceUris)
-        if (cwd) directories.add(cwd)
+        for (const cwd of allWorkspaceDirectories(row.workspaceUris)) {
+          if (cwd) directories.add(cwd)
+        }
       }
       return [...directories]
     }

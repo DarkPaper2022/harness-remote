@@ -148,12 +148,14 @@ export function projectFederatedSession(
   const project = federatedProjectIdentity(identity)
   const model = federatedModelIdentity(identity.session.model)
   const searchText = [
+    identity.session.id,
     identity.session.title,
     identity.machineName,
     identity.agentLabel,
     identity.agentID,
     project.label,
     identity.projectPath,
+    identity.session.directory,
     identity.session.project?.worktree,
     identity.session.model?.providerID,
     identity.session.model?.id,

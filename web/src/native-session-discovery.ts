@@ -322,18 +322,39 @@ export async function searchAgentNativeSessions(
   const sessions = new Map<string, Session>()
   const cursors = new Set<string>()
   let cursor: string | undefined
-  do {
-    if (timeoutMs > 0 && Date.now() - startedAt >= timeoutMs) {
-      throw new NativeSessionDiscoveryTimeoutError(agent.id, timeoutMs)
+  const normalizedQuery = query.trim()
+  try {
+    do {
+      if (timeoutMs > 0 && Date.now() - startedAt >= timeoutMs) {
+        throw new NativeSessionDiscoveryTimeoutError(agent.id, timeoutMs)
+      }
+      const page = await bounded(client.listGlobalSessionPage(config, cursor, normalizedQuery))
+      for (const session of page.sessions) sessions.set(session.id, session)
+      cursor = page.nextCursor
+      if (cursor) {
+        if (cursors.has(cursor)) throw new Error(`Native Session search for ${agent.id} returned a repeated cursor`)
+        cursors.add(cursor)
+      }
+    } while (cursor)
+  } catch (error) {
+    if (sessions.size > 0) {
+      // Return partial historical matches already collected before a deep-page timeout.
+    } else if (!cursor && !(error instanceof NativeSessionDiscoveryTimeoutError)) {
+      const fallback = await bounded(client.listSessions(config))
+      const lower = normalizedQuery.toLowerCase()
+      for (const session of fallback) {
+        if (
+          session.id.toLowerCase().includes(lower)
+          || (session.title || "").toLowerCase().includes(lower)
+          || (session.directory || "").toLowerCase().includes(lower)
+        ) {
+          sessions.set(session.id, session)
+        }
+      }
+    } else {
+      throw error
     }
-    const page = await bounded(client.listGlobalSessionPage(config, cursor, query.trim()))
-    for (const session of page.sessions) sessions.set(session.id, session)
-    cursor = page.nextCursor
-    if (cursor) {
-      if (cursors.has(cursor)) throw new Error(`Native Session search for ${agent.id} returned a repeated cursor`)
-      cursors.add(cursor)
-    }
-  } while (cursor)
+  }
   const matches = [...sessions.values()]
   const statuses = matches.some((session) => !session.status)
     ? await bounded(client.listStatuses(config)).catch(() => ({} as Record<string, SessionStatus>))
@@ -352,11 +373,15 @@ export async function searchAgentNativeSessions(
 export async function discoverAgentNativeSessions(
   base: ServerConfig,
   agent: MachineAgentHost,
-  client: NativeSessionReadApi = api
+  client: NativeSessionReadApi = api,
+  allHistory = false
 ): Promise<NativeSessionRecord[]> {
   if (agent.capabilities?.sessions === false) return []
   const config = nativeSessionConfig(base, agent)
-  const sessions = await client.listGlobalSessions(config).catch(() => client.listSessions(config))
+  const sessions = await (client === api
+    ? api.listGlobalSessions(config, allHistory)
+    : client.listGlobalSessions(config)
+  ).catch(() => client.listSessions(config))
   const statuses = await client.listStatuses(config).catch(() => ({} as Record<string, SessionStatus>))
   return nativeSessionRecords(agent, config, sessions, statuses)
 }

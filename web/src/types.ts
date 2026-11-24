@@ -27,6 +27,7 @@ export type HarnessCapabilities = {
   sessionRename: boolean
   sessionDelete: boolean
   attachments: boolean
+  steering?: boolean
 }
 
 export type HarnessCapabilityContract = {

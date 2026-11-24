@@ -5,6 +5,7 @@ import type { DesktopLocalRuntimeState } from "../electron/ipc-contract"
 import { installAppPreferences } from "./appPreferences"
 import { installCompletionAudioGuard } from "./completion-audio"
 import { StandaloneUniversalWorkspace } from "./components/standalone-universal-workspace"
+import { markHotBundleBootHealthy } from "./ios-hot-update"
 import {
   desktopLocalRuntimeState,
   isDesktopPlatform,
@@ -48,6 +49,7 @@ import "./machine-pairing.css"
 // Loaded last: the ported controls refine rules the sheets above already set, and settling those
 // ties by load order is what keeps the port free of `!important`.
 import "./beautiful-ui-controls.css"
+import "./t3-modern-polish.css"
 
 installAppPreferences()
 installCompletionAudioGuard()
@@ -192,6 +194,10 @@ function HarnessRemoteBoundary() {
       pairingInFlightRef.current.delete(grantKey)
     }
   }
+
+  useEffect(() => {
+    markHotBundleBootHealthy()
+  }, [])
 
   useEffect(() => subscribeAndroidMachinePairing((activation) => {
     void claimPairingActivation(activation)

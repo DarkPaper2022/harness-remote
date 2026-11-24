@@ -38,6 +38,15 @@ import { migrateNativeSessionMachineStorage } from "../native-session-machine-id
 import { nativeSessionTransferredContext } from "../native-session-prompt"
 import type { NativeSessionRouteMachine } from "../native-session-routing"
 import type { MachineSnapshot, Session } from "../types"
+import {
+  applyIosHotUpdateFromServer,
+  checkServerWebUpdate,
+  inspectNativeWebViewPath,
+  isIosNativeHotUpdateSupported,
+  loadAppliedHotBundleInfo,
+  resetIosHotUpdateToBuiltIn,
+  type WebUpdateManifest
+} from "../ios-hot-update"
 import { subscribeTaskDeskLiveEvents } from "../taskdesk-live-events"
 import {
   createWorkspaceMachine,
@@ -53,6 +62,7 @@ import { NativeSessionActions } from "./native-session-actions"
 import { NativeSessionHome } from "./native-session-home"
 import { NativeSessionTitle } from "./native-session-rename"
 import { NativeSessionObserver, type NativeSessionVisualState } from "./native-session-observer"
+import { TerminalDrawer } from "./terminal-drawer"
 import "../taskdesk-workthreads.css"
 import "../taskdesk-mobile-navigation.css"
 import "../taskdesk-focus-layout.css"
@@ -398,12 +408,98 @@ function MachineManager({
   )
 }
 
-function MobileSettingsPage({ onClose }: { onClose: () => void }) {
+function MobileSettingsPage({
+  machines,
+  onClose
+}: {
+  machines: WorkspaceMachine[]
+  onClose: () => void
+}) {
   const [language, setLanguage] = useState<LanguageCode>(loadLanguage)
   const [theme, setTheme] = useState<ThemePreference>(loadThemePreference)
   const t = useMemo(() => createTranslator(language), [language])
   const pageRef = useRef<HTMLElement>(null)
   useDialogDismiss(pageRef, onClose, { autoFocus: false })
+
+  const iosHotSupported = isIosNativeHotUpdateSupported()
+  const [selectedUpdateMachineId, setSelectedUpdateMachineId] = useState(() => machines[0]?.id || "")
+  const [remoteManifest, setRemoteManifest] = useState<WebUpdateManifest | null>(null)
+  const [checkingUpdate, setCheckingUpdate] = useState(false)
+  const [applyingUpdate, setApplyingUpdate] = useState(false)
+  const [updateProgress, setUpdateProgress] = useState<{ done: number; total: number } | null>(null)
+  const [updateStatus, setUpdateStatus] = useState<string | null>(null)
+  const [updateError, setUpdateError] = useState<string | null>(null)
+  const [isHotSnapshot, setIsHotSnapshot] = useState(false)
+  const appliedBundle = useMemo(loadAppliedHotBundleInfo, [applyingUpdate, isHotSnapshot])
+
+  useEffect(() => {
+    if (!machines.some((m) => m.id === selectedUpdateMachineId)) {
+      setSelectedUpdateMachineId(machines[0]?.id || "")
+    }
+  }, [machines, selectedUpdateMachineId])
+
+  useEffect(() => {
+    if (!iosHotSupported) return
+    void inspectNativeWebViewPath().then(({ isHotSnapshot: hot }) => setIsHotSnapshot(hot))
+  }, [iosHotSupported])
+
+  const selectedUpdateMachine = machines.find((m) => m.id === selectedUpdateMachineId) ?? machines[0]
+
+  useEffect(() => {
+    if (!selectedUpdateMachine) {
+      setRemoteManifest(null)
+      return
+    }
+    let cancelled = false
+    setCheckingUpdate(true)
+    setUpdateError(null)
+    void checkServerWebUpdate(selectedUpdateMachine.config)
+      .then((manifest) => {
+        if (!cancelled) setRemoteManifest(manifest)
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setRemoteManifest(null)
+          setUpdateError(error instanceof Error ? error.message : String(error))
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setCheckingUpdate(false)
+      })
+    return () => { cancelled = true }
+  }, [selectedUpdateMachine?.id])
+
+  async function runHotUpdate() {
+    if (!selectedUpdateMachine || applyingUpdate) return
+    setApplyingUpdate(true)
+    setUpdateError(null)
+    setUpdateStatus(null)
+    setUpdateProgress({ done: 0, total: remoteManifest?.files?.length || 1 })
+    try {
+      const result = await applyIosHotUpdateFromServer(
+        selectedUpdateMachine.config,
+        selectedUpdateMachine.name,
+        (done, total) => setUpdateProgress({ done, total })
+      )
+      setUpdateStatus(`Applied Web UI ${result.bundleId}. Reloading…`)
+    } catch (error: unknown) {
+      setUpdateError(error instanceof Error ? error.message : String(error))
+      setApplyingUpdate(false)
+      setUpdateProgress(null)
+    }
+  }
+
+  async function resetHotUpdate() {
+    if (applyingUpdate) return
+    setApplyingUpdate(true)
+    setUpdateError(null)
+    try {
+      await resetIosHotUpdateToBuiltIn()
+    } catch (error: unknown) {
+      setUpdateError(error instanceof Error ? error.message : String(error))
+      setApplyingUpdate(false)
+    }
+  }
 
   function changeLanguage(value: string) {
     const next = languageOptions.find((option) => option.code === value)?.code
@@ -418,6 +514,12 @@ function MobileSettingsPage({ onClose }: { onClose: () => void }) {
     persistThemePreference(value)
   }
 
+  const updateAvailable = Boolean(
+    remoteManifest?.available
+    && remoteManifest.bundleId
+    && remoteManifest.bundleId !== appliedBundle?.bundleId
+  )
+
   return (
     <div className="hr-session-settings-backdrop" role="presentation" onMouseDown={onClose}>
       <section className="hr-mobile-settings-page hr-session-settings-page" role="dialog" aria-modal="true" aria-label={t("nav.settings")} ref={pageRef} onMouseDown={(event) => event.stopPropagation()}>
@@ -431,6 +533,80 @@ function MobileSettingsPage({ onClose }: { onClose: () => void }) {
             <label><strong>{t("settings.theme")}</strong><select value={theme} onChange={(event) => changeTheme(event.target.value)}><option value="system">{t("settings.themeSystem")}</option><option value="light">{t("settings.themeLight")}</option><option value="dark">{t("settings.themeDark")}</option></select></label>
             <label><strong>{t("settings.language")}</strong><select value={language} onChange={(event) => changeLanguage(event.target.value)}>{languageOptions.map((option) => <option value={option.code} key={option.code}>{option.label}</option>)}</select></label>
           </div>
+          {machines.length > 0 ? (
+            <div className="hr-mobile-settings-group hr-hot-update-card">
+              <span>{language.startsWith("zh") ? "Web UI 热更新 (Capacitor iOS)" : "Web UI Hot Update (Capacitor iOS)"}</span>
+              {machines.length > 1 ? (
+                <label>
+                  <strong>{t("sf.machines")}</strong>
+                  <select value={selectedUpdateMachineId} onChange={(event) => setSelectedUpdateMachineId(event.target.value)}>
+                    {machines.map((machine) => <option value={machine.id} key={machine.id}>{machine.name}</option>)}
+                  </select>
+                </label>
+              ) : null}
+              <div className="hr-hot-update-meta">
+                <div>
+                  <strong>{language.startsWith("zh") ? "当前 UI 快照" : "Current UI bundle"}</strong>
+                  <code>{appliedBundle ? `${appliedBundle.bundleId} (OTA)` : language.startsWith("zh") ? "IPA 内置包" : "Built-in IPA bundle"}</code>
+                </div>
+                <div>
+                  <strong>{language.startsWith("zh") ? "服务端最新包" : "Server bundle"}</strong>
+                  <code>
+                    {checkingUpdate
+                      ? (language.startsWith("zh") ? "检查中…" : "Checking…")
+                      : remoteManifest?.available
+                        ? `${remoteManifest.bundleId} (${Math.round((remoteManifest.totalBytes || 0) / 1024)} KB)`
+                        : (language.startsWith("zh") ? "未就绪" : "Unavailable")}
+                  </code>
+                </div>
+              </div>
+              {updateProgress ? (
+                <small className="hr-hot-update-note">
+                  {language.startsWith("zh")
+                    ? `正在同步资源 ${updateProgress.done}/${updateProgress.total}…`
+                    : `Syncing assets ${updateProgress.done}/${updateProgress.total}…`}
+                </small>
+              ) : null}
+              {updateStatus ? <small className="hr-hot-update-note success">{updateStatus}</small> : null}
+              {updateError ? <small className="hr-hot-update-note error">{updateError}</small> : null}
+              <div className="hr-hot-update-actions">
+                {iosHotSupported ? (
+                  <>
+                    <button
+                      type="button"
+                      className="tdw-button primary"
+                      disabled={applyingUpdate || checkingUpdate || !remoteManifest?.available}
+                      onClick={() => void runHotUpdate()}
+                    >
+                      {applyingUpdate
+                        ? (language.startsWith("zh") ? "正在热更新…" : "Updating…")
+                        : updateAvailable
+                          ? (language.startsWith("zh") ? "立即同步服务端 Web UI" : "Apply Server Web UI")
+                          : (language.startsWith("zh") ? "重新同步当前 Web UI" : "Re-sync Web UI")}
+                    </button>
+                    {isHotSnapshot || appliedBundle ? (
+                      <button
+                        type="button"
+                        className="tdw-button secondary"
+                        disabled={applyingUpdate}
+                        onClick={() => void resetHotUpdate()}
+                      >
+                        {language.startsWith("zh") ? "恢复 IPA 内置包" : "Reset to IPA Bundle"}
+                      </button>
+                    ) : null}
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    className="tdw-button secondary"
+                    onClick={() => window.location.reload()}
+                  >
+                    {language.startsWith("zh") ? "网页端直接刷新生效（在 iPad App 内可免装 IPA 热更）" : "Reload Web Page (iPad App supports OTA hot-swap here)"}
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : null}
           <p>{t("sf.appearanceShared")}</p>
         </div>
         <footer><button type="button" className="tdw-button primary" onClick={onClose}>{t("action.close")}</button></footer>
@@ -503,6 +679,7 @@ function NativeSessionsWorkspace({
   const [sessionsDiscovered, setSessionsDiscovered] = useState(machines.length === 0)
   const [railWidth, setRailWidth] = useState<number | null>(loadRailWidth)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [terminalOpen, setTerminalOpen] = useState(false)
   const refreshGeneration = useRef(0)
   const pendingSessionRefreshToken = useRef<number | null>(null)
 
@@ -538,6 +715,11 @@ function NativeSessionsWorkspace({
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
         event.preventDefault()
         setPaletteOpen((open) => !open)
+        return
+      }
+      if ((event.ctrlKey || event.metaKey) && (event.key === "`" || event.code === "Backquote")) {
+        event.preventDefault()
+        setTerminalOpen((open) => !open)
       }
     }
     window.addEventListener("keydown", onKeyDown)
@@ -813,7 +995,7 @@ function NativeSessionsWorkspace({
       return
     }
     try {
-      const records = await discoverAgentNativeSessions(runtime.machine.config, agent)
+      const records = await discoverAgentNativeSessions(runtime.machine.config, agent, undefined, true)
       const record = records.find((candidate) => candidate.session.id === ref.sessionID)
       if (!record) throw new Error("The linked native Session is no longer available.")
       openSession(nativeSessionSurfaceTarget(ref.machineID, runtime.machine.config, record))
@@ -939,14 +1121,24 @@ function NativeSessionsWorkspace({
       keywords: "reload refresh sessions",
       run: requestRefresh
     },
-    ...(selected ? [{
-      id: "back-to-sessions",
-      group: "Sessions",
-      label: t("sf.backToSessions"),
-      keywords: "close current session list",
-      run: () => setMobileDetailOpen(false)
-    }] : [])
-  ], [onManageMachines, onManageSettings, requestRefresh, selected, t])
+    ...(selected ? [
+      {
+        id: "toggle-terminal",
+        group: "Sessions",
+        label: terminalOpen ? "Hide Workspace Terminal" : "Open Workspace Terminal",
+        keywords: "terminal shell bash zsh console pty",
+        shortcut: "Ctrl+`",
+        run: () => setTerminalOpen((open) => !open)
+      },
+      {
+        id: "back-to-sessions",
+        group: "Sessions",
+        label: t("sf.backToSessions"),
+        keywords: "close current session list",
+        run: () => setMobileDetailOpen(false)
+      }
+    ] : [])
+  ], [onManageMachines, onManageSettings, requestRefresh, selected, t, terminalOpen])
 
   return (
     <section className="tdw-shell hr-control-plane hr-native-workspace" aria-label={t("nav.sessions")}>
@@ -1049,6 +1241,17 @@ function NativeSessionsWorkspace({
                       {Number(selected.cost) > 0 ? <span title={t("sf.reportedCost")}>${Number(selected.cost).toFixed(2)}</span> : null}
                     </div>
                   ) : null}
+                  {selected.directory ? (
+                    <button
+                      type="button"
+                      className={`tdw-button secondary hr-header-terminal-toggle${terminalOpen ? " active" : ""}`}
+                      onClick={() => setTerminalOpen((open) => !open)}
+                      title="Toggle workspace terminal (Ctrl+`)"
+                    >
+                      <code>&gt;_</code>
+                      <span>Terminal</span>
+                    </button>
+                  ) : null}
                   <NativeSessionActions
                     target={selected}
                     busy={selectedState === "working"}
@@ -1102,8 +1305,19 @@ function NativeSessionsWorkspace({
                   onOpenSession={openSession}
                   onSessionRefresh={() => setListRevision((value) => value + 1)}
                   onStateChange={setSelectedState}
+                  terminalOpen={terminalOpen}
+                  onToggleTerminal={selected.directory ? () => setTerminalOpen((open) => !open) : undefined}
                 />
               </div>
+              {terminalOpen && selected.directory ? (
+                <TerminalDrawer
+                  config={selected.config}
+                  directory={selected.directory}
+                  projectName={selectedProject}
+                  interactionEnabled={selectedInteractionEnabled}
+                  onClose={() => setTerminalOpen(false)}
+                />
+              ) : null}
             </>
           ) : machines.length === 0 ? (
             <div className="hr-native-workspace-empty hr-native-startup">
@@ -1267,7 +1481,7 @@ export function StandaloneUniversalWorkspace({
           pairingSuccessMachineName={machinePairingSuccessMachineName}
         />
       ) : null}
-      {settingsOpen ? <MobileSettingsPage onClose={() => setSettingsOpen(false)} /> : null}
+      {settingsOpen ? <MobileSettingsPage machines={machines} onClose={() => setSettingsOpen(false)} /> : null}
       <nav className="hr-mobile-nav" aria-label={t("sf.mainNavigation")}>
         <button type="button" className={mobileSection === "sessions" ? "active" : ""} onClick={showSessions} aria-current={mobileSection === "sessions" ? "page" : undefined}><ChatIcon size={20} /><span>{t("nav.sessions")}</span>{attentionCount ? <b className="hr-mobile-nav-badge" aria-label={t("sf.attentionCount", { count: attentionCount })}>{attentionCount > 9 ? "9+" : attentionCount}</b> : null}</button>
         <button type="button" className={mobileSection === "machines" ? "active" : ""} onClick={showMachines} aria-current={mobileSection === "machines" ? "page" : undefined}><ServerIcon size={20} /><span>{t("sf.machines")}</span></button>

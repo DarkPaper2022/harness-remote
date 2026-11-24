@@ -24,12 +24,56 @@ export class SessionAcpClient extends EventEmitter {
     for (const event of ["notification", "stderr", "protocol-error", "permission", "agent-request"]) {
       client.on(event, (...args) => this.emit(event, ...args))
     }
+    client.on("exit", () => {
+      if (client === this.#catalog) return
+      this.#clients.delete(client)
+      for (const [sessionID, activeClient] of this.#sessions) {
+        if (activeClient === client) this.#sessions.delete(sessionID)
+      }
+    })
     return client
   }
 
-  get agentInfo() { return this.#catalog.agentInfo }
-  get promptCapabilities() { return this.#catalog.promptCapabilities }
-  get sessionCapabilities() { return this.#catalog.sessionCapabilities }
+  #anyClientWith(select) {
+    const fromCatalog = select(this.#catalog)
+    if (fromCatalog !== undefined) return fromCatalog
+    for (const client of this.#sessions.values()) {
+      const candidate = select(client)
+      if (candidate !== undefined) return candidate
+    }
+    return undefined
+  }
+
+  get agentInfo() { return this.#catalog.agentInfo ?? this.#anyClientWith((c) => c.agentInfo) }
+  get promptCapabilities() {
+    if (this.#catalog.promptCapabilities && Object.keys(this.#catalog.promptCapabilities).length > 0) {
+      return this.#catalog.promptCapabilities
+    }
+    for (const client of this.#sessions.values()) {
+      if (client.promptCapabilities && Object.keys(client.promptCapabilities).length > 0) {
+        return client.promptCapabilities
+      }
+    }
+    return this.#catalog.promptCapabilities
+  }
+  get sessionCapabilities() {
+    if (this.#catalog.sessionCapabilities && Object.keys(this.#catalog.sessionCapabilities).length > 0) {
+      return this.#catalog.sessionCapabilities
+    }
+    for (const client of this.#sessions.values()) {
+      if (client.sessionCapabilities && Object.keys(client.sessionCapabilities).length > 0) {
+        return client.sessionCapabilities
+      }
+    }
+    return this.#catalog.sessionCapabilities
+  }
+  get steeringSupported() {
+    if (this.#catalog.steeringSupported) return true
+    for (const client of this.#sessions.values()) {
+      if (client.steeringSupported) return true
+    }
+    return false
+  }
   get processID() { return this.#catalog.processID }
   start(...args) { return this.#catalog.start(...args) }
   listSessions(...args) { return this.#catalog.listSessions(...args) }

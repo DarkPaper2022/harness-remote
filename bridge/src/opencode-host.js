@@ -101,10 +101,21 @@ export async function waitForOpenCodeHealth({ host, port, username, password, ti
     const timer = setTimeout(() => controller.abort(), Math.min(READINESS_ATTEMPT_MS, remaining))
     try {
       const response = await fetchImpl(url, {
-        headers: { Authorization: `Basic ${authorization}` },
+        headers: { Authorization: `Basic ${authorization}`, Accept: "application/json" },
         signal: controller.signal
       })
-      if (response.status === 200) return
+      if (response.status === 200) {
+        const contentType = response.headers?.get?.("content-type")
+        // OpenCode v2.x replaced the v1 JSON `/global/health` endpoint with a catch-all HTML SPA
+        // shell (`text/html`). Treat an explicit HTML document on `/global/health` as incompatible
+        // rather than healthy, while keeping header-less test mocks valid.
+        if (typeof contentType === "string" && contentType.toLowerCase().includes("text/html")) {
+          throw new OpenCodeCredentialError(
+            `OpenCode on ${host}:${port} served an HTML page on /global/health (OpenCode v2+ HTTP server is incompatible with the v1 HTTP API)`
+          )
+        }
+        return
+      }
       if (response.status === 401) {
         throw new OpenCodeCredentialError(`OpenCode health check rejected the generated credentials on ${host}:${port}`)
       }

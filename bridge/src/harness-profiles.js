@@ -121,7 +121,7 @@ export const HARNESS_PROFILES = {
       // rather than `provider/model`, which is handled where the response is built.
       models: true,
       todos: true,
-      commands: false,
+      commands: true,
       actions: false,
       sessionRename: true,
       sessionDelete: true

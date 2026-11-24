@@ -820,7 +820,9 @@ function nativeConversationController(entry: NativeConversationEntry): Conversat
       requireConversationScope(entry, conversationId)
       const body: ConversationContinueInput = input
       const prompt = body.prompt?.trim() || ""
-      if (!prompt) throw new Error("A text prompt is required")
+      if (!prompt && !(body.attachments?.length) && !body.command) {
+        throw new Error("A text prompt or image attachment is required")
+      }
       if (body.agentId && body.agentId !== entry.target.agentID) {
         throw new Error("Cross-agent continuation is disabled until single-Session parity is validated")
       }
@@ -830,7 +832,9 @@ function nativeConversationController(entry: NativeConversationEntry): Conversat
       try {
         result = body.command
           ? await sendNativeSessionCommand(entry.target, body.command.name, body.command.arguments, model)
-          : await sendNativeSessionPrompt(entry.target, prompt, model, body.attachments ?? [])
+          : body.delivery
+            ? await sendNativeSessionPrompt(entry.target, prompt, model, body.attachments ?? [], body.delivery)
+            : await sendNativeSessionPrompt(entry.target, prompt, model, body.attachments ?? [])
       } catch (reason) {
         if (!body.command) {
           const recovered = await reconcilePromptAfterTransportFailure(entry)

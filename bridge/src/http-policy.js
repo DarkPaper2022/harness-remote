@@ -19,11 +19,20 @@ export function normalizeCorsOrigin(value) {
   }
 }
 
-/** Returns the request origin when it is explicitly allowed by --cors. */
+const NATIVE_WEBVIEW_ORIGINS = new Set([
+  "capacitor://localhost",
+  "ionic://localhost",
+  "http://localhost",
+  "https://localhost"
+])
+
+/** Returns the request origin when it is explicitly allowed by --cors or is a native Capacitor WebView shell. */
 export function allowedOrigin(request, config) {
   const origin = request.headers.origin
-  if (!origin || !config.corsOrigins?.length) return undefined
+  if (!origin) return undefined
   const normalizedOrigin = normalizeCorsOrigin(origin)
+  if (NATIVE_WEBVIEW_ORIGINS.has(normalizedOrigin)) return origin
+  if (!config.corsOrigins?.length) return undefined
   return config.corsOrigins.some((candidate) => normalizeCorsOrigin(candidate) === normalizedOrigin) ? origin : undefined
 }
 
@@ -32,9 +41,9 @@ export function allowedOrigin(request, config) {
  * back individually and responses are marked as origin-dependent for caches.
  */
 export function applyCorsHeaders(request, response, config) {
-  if (!config.corsOrigins?.length) return
-  response.setHeader("Vary", "Origin")
   const origin = allowedOrigin(request, config)
+  if (!origin && !config.corsOrigins?.length) return
+  response.setHeader("Vary", "Origin")
   if (!origin) return
   response.setHeader("Access-Control-Allow-Origin", origin)
   response.setHeader("Access-Control-Allow-Credentials", "true")

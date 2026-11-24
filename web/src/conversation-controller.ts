@@ -10,6 +10,7 @@ export type ConversationContinueInput = {
   model?: ModelSelection | null
   attachments?: AttachmentPart[]
   command?: { name: string; arguments: string }
+  delivery?: "steer" | "queue"
 }
 
 /**

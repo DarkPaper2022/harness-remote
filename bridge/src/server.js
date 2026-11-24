@@ -226,7 +226,9 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
   const hiddenSessionIDs = serviceOptions?.hiddenSessionIDs
   const liveSessionActivity = new Map()
   let sseClients = 0
+  const nativePageCache = new Map()
   const unsubscribeActivity = service.subscribe((event) => {
+    nativePageCache.clear()
     if (!event?.sessionId) return
     if (event.type === "session.deleted") {
       liveSessionActivity.delete(event.sessionId)
@@ -270,7 +272,6 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
   // the resolved page additionally absorbs the burst of listing/status requests a client makes while
   // the startup screen is still settling. The cache stores the raw harness page so late filtering
   // (window, hidden, deleted, ownership) still happens per request and cannot go stale.
-  const nativePageCache = new Map()
   const loadNativePage = (cursor, windowMs, query = "") => {
     // Cache by the requested window, not its moving millisecond cutoff. The exact window filter
     // still runs per response, and the database cutoff is refreshed when the short TTL expires.
@@ -338,9 +339,14 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
     await recoverMissingUpdatedAt(page.sessions)
     service.rememberListedSessions(page.sessions)
     const lowerQuery = query ? query.toLowerCase() : ""
-    const matchesQuery = (title, id, cwd) => {
+    const titleOverrides = service.titleOverrides?.() ?? new Map()
+    const matchesQuery = (title, id, cwd, searchText) => {
       if (!lowerQuery) return true
-      return (typeof title === "string" && title.toLowerCase().includes(lowerQuery)) ||
+      const effectiveTitle = (typeof title === "string" && title.trim())
+        ? title
+        : `Session ${String(id ?? "").slice(0, 8)}`
+      return effectiveTitle.toLowerCase().includes(lowerQuery) ||
+             (typeof searchText === "string" && searchText.toLowerCase().includes(lowerQuery)) ||
              (typeof id === "string" && id.toLowerCase().includes(lowerQuery)) ||
              (typeof cwd === "string" && cwd.toLowerCase().includes(lowerQuery))
     }
@@ -349,13 +355,17 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
         .filter((session) => !directory || sameListedDirectory(session.cwd, directory))
         .filter((session) => !hiddenSessionIDs?.has(session.sessionId))
         .filter((session) => !deletedSessionIDs.has(session.sessionId))
-        .filter((session) => matchesQuery(session.title, session.sessionId, session.cwd))
+        .filter((session) => {
+          const override = titleOverrides.get(session.sessionId)
+          return matchesQuery(override || session.title, session.sessionId, session.cwd, session.searchText)
+        })
         .map((session) => {
           const liveUpdatedAt = liveSessionActivity.get(session.sessionId) ?? 0
           const listedUpdated = Date.parse(session.updatedAt ?? "")
           const listedTimestamp = Number.isFinite(listedUpdated) ? listedUpdated : 0
+          const override = titleOverrides.get(session.sessionId)
           const view = listedSessionView(
-            session,
+            override ? { ...session, title: override } : session,
             publicSessionStatus(session.sessionId, Math.max(liveUpdatedAt, listedTimestamp)),
             liveUpdatedAt
           )
@@ -370,7 +380,7 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
     for (const { session, titleOverride } of service.ownedSessionIndex(directory)) {
       if (hiddenSessionIDs?.has(session.id) || deletedSessionIDs.has(session.id)) continue
       const title = titleOverride || session.title
-      if (!matchesQuery(title, session.id, session.directory)) continue
+      if (!matchesQuery(title, session.id, session.directory, undefined)) continue
       const listed = visible.get(session.id)
       if (listed && titleOverride) {
         visible.set(session.id, { ...listed, title: titleOverride })
@@ -382,12 +392,17 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
       }
     }
     const sessions = [...visible.values()]
+    const windowedSessions = cutoff ? sessions.filter((session) => (session.time?.updated ?? 0) >= cutoff) : sessions
+    const keepNextCursor = Boolean(
+      page.nextCursor
+      && (!cutoff || lowerQuery || windowedSessions.length > 0)
+    )
     return {
       // The window is applied to the rendered view so a Session that only looks active because of
       // bridge-tracked live activity is kept even when the harness timestamp is older than the
       // window. The harness-side fast path already narrowed its own query for the common case.
-      sessions: cutoff ? sessions.filter((session) => (session.time?.updated ?? 0) >= cutoff) : sessions,
-      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+      sessions: windowedSessions,
+      ...(keepNextCursor ? { nextCursor: page.nextCursor } : {})
     }
   }
 
@@ -456,7 +471,11 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
       }
       if (request.method === "GET" && url.pathname === "/v1/capabilities") {
         await acp.start()
-        writeJSON(response, 200, { ...profile.capabilities, attachments: Boolean(acp.promptCapabilities?.image) })
+        writeJSON(response, 200, {
+          ...profile.capabilities,
+          attachments: Boolean(acp.promptCapabilities?.image),
+          steering: Boolean(acp.steeringSupported)
+        })
         return
       }
       if (request.method === "GET" && (url.pathname === "/v1/events" || url.pathname === "/global/event")) {
@@ -481,15 +500,15 @@ export function createBridgeServer({ config, acp, serviceOptions, machineRegistr
         return
       }
       if (request.method === "GET" && url.pathname === "/experimental/session") {
-        const query = url.searchParams.get("q")?.trim() || ""
-        const windowMs = query && !url.searchParams.has("days") ? 0 : requestedWindowMs(url, defaultWindowMs)
+        const query = url.searchParams.get("q")?.trim() || url.searchParams.get("search")?.trim() || ""
+        const windowMs = query && !url.searchParams.get("days")?.trim() ? 0 : requestedWindowMs(url, defaultWindowMs)
         const page = await listVisibleSessionMetadata(directory, url.searchParams.get("cursor") || undefined, windowMs, query)
         if (page.nextCursor) response.setHeader("x-next-cursor", page.nextCursor)
         writeJSON(response, 200, page.sessions)
         return
       }
       if (request.method === "GET" && (url.pathname === "/v1/sessions" || url.pathname === "/session")) {
-        const query = url.searchParams.get("q")?.trim() || ""
+        const query = url.searchParams.get("q")?.trim() || url.searchParams.get("search")?.trim() || ""
         writeJSON(response, 200, await listVisibleSessions(directory, query))
         return
       }

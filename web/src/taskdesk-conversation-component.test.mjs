@@ -81,7 +81,7 @@ test("machine reconnect pauses mutations and resumes reconciliation in place", (
   assert.match(controller, /interactionEnabled = true/)
   assert.match(controller, /if \(!interactionEnabled\) \{[\s\S]*setModelsLoading\(false\)/)
   assert.match(controller, /sendInFlightRef\.current[\s\S]*\|\| !interactionEnabled[\s\S]*\|\| modelBootstrapBlocked/)
-  assert.match(controller, /sendDisabled=\{!interactionEnabled \|\| working/)
+  assert.match(controller, /sendDisabled=\{!interactionEnabled \|\| \(\(!allowActiveTurnSend \|\| routeChanged\) && \(working \|\| replySettling\)\)/)
   assert.match(controller, /if \(!wasEnabled && interactionEnabled\) \{[\s\S]*void reconcile\(\)/)
   assert.match(controller, /onConnectionIssueRef\.current\?\.\(\)/)
 })

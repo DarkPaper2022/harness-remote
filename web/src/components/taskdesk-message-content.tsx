@@ -430,6 +430,12 @@ function ActivityGroup({ group }: { group: ActivityGroupValue }) {
   const previousStatus = useRef(group.status)
   const running = group.status === "running"
   const elapsed = useElapsedLabel(activityStartedAt(group), running)
+  const liveTextPreview = running && !open
+    ? [...group.parts]
+        .reverse()
+        .find((part) => part.type === "text" && typeof part.text === "string" && part.text.trim())
+        ?.text?.trim()
+    : undefined
 
   useEffect(() => {
     const prior = previousStatus.current
@@ -441,25 +447,36 @@ function ActivityGroup({ group }: { group: ActivityGroupValue }) {
   }, [group.status])
 
   return (
-    <details
-      className={`uw-tool-card uw-activity-group uw-tool-${group.status} bui-activity`}
-      open={open}
-      onToggle={(event) => setOpen(event.currentTarget.open)}
-    >
-      <summary>
-        <ToolStatusIcon status={group.status} />
-        <span className="uw-tool-title">{activityLabel(group)}</span>
-        <span className="bui-tool-meta">
-          {elapsed ? <span className="bui-tool-duration">{elapsed}</span> : null}
-          <span className="uw-tool-status">{activityStatusLabel(group.status)}</span>
-        </span>
-      </summary>
-      {open ? (
-        <div className="uw-activity-parts">
-          {group.parts.map((part) => <ActivityPart key={part.id} part={part} />)}
+    <>
+      <details
+        className={`uw-tool-card uw-activity-group uw-tool-${group.status} bui-activity`}
+        open={open}
+        onToggle={(event) => setOpen(event.currentTarget.open)}
+      >
+        <summary>
+          <ToolStatusIcon status={group.status} />
+          <span className="uw-tool-title">{activityLabel(group)}</span>
+          <span className="bui-tool-meta">
+            {elapsed ? <span className="bui-tool-duration">{elapsed}</span> : null}
+            <span className="uw-tool-status">{activityStatusLabel(group.status)}</span>
+          </span>
+        </summary>
+        {open ? (
+          <div className="uw-activity-parts">
+            {group.parts.map((part) => <ActivityPart key={part.id} part={part} />)}
+          </div>
+        ) : null}
+      </details>
+      {liveTextPreview ? (
+        <div
+          className="uw-live-stream-preview"
+          onClick={() => setOpen(true)}
+          title="Click to expand full live stream"
+        >
+          {liveTextPreview.length > 360 ? `…${liveTextPreview.slice(-360)}` : liveTextPreview}
         </div>
       ) : null}
-    </details>
+    </>
   )
 }
 

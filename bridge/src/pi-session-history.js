@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs"
-import { appendFile, open, readdir, stat } from "node:fs/promises"
+import { access, appendFile, open, readdir, stat } from "node:fs/promises"
 import { randomUUID } from "node:crypto"
 import { homedir } from "node:os"
 import path from "node:path"
@@ -233,7 +233,9 @@ export function createPiHistoryLoader(sessionRoot = defaultSessionRoot()) {
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue
       const stem = entry.name.slice(0, -".jsonl".length)
-      const separator = stem.lastIndexOf("_")
+      // PI names journals `<ISO-timestamp>_<sessionID>.jsonl`, where `sessionID` itself may contain `_`.
+      // Split on the first `_` after the timestamp prefix rather than `lastIndexOf("_")`.
+      const separator = stem.indexOf("_")
       if (separator <= 0 || separator === stem.length - 1) continue
       const sessionID = stem.slice(separator + 1)
       if (!/^[A-Za-z0-9._-]+$/.test(sessionID)) continue
@@ -245,7 +247,7 @@ export function createPiHistoryLoader(sessionRoot = defaultSessionRoot()) {
         continue
       }
       const known = byID.get(sessionID)
-      if (!known || mtimeMs > known.mtimeMs) byID.set(sessionID, { file, mtimeMs })
+      if (!known || mtimeMs > known.mtimeMs) byID.set(sessionID, { file, mtimeMs, name: entry.name })
     }
     return byID
   }
@@ -270,8 +272,25 @@ export function createPiHistoryLoader(sessionRoot = defaultSessionRoot()) {
   async function locateSession(sessionID) {
     if (!/^[A-Za-z0-9._-]+$/.test(sessionID)) return undefined
     const known = sessionFiles.get(sessionID)
-    if (known) return known
-    const entry = (await sessionIndex()).get(sessionID)
+    if (known) {
+      try {
+        await access(known)
+        return known
+      } catch {
+        sessionFiles.delete(sessionID)
+      }
+    }
+    const index = await sessionIndex()
+    let entry = index.get(sessionID)
+    if (!entry) {
+      const suffix = `_${sessionID}.jsonl`
+      for (const candidate of index.values()) {
+        if (candidate.name?.endsWith(suffix)) {
+          entry = candidate
+          break
+        }
+      }
+    }
     if (!entry) return undefined
     sessionFiles.set(sessionID, entry.file)
     return entry.file

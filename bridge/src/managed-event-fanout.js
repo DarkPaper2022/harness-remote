@@ -69,6 +69,10 @@ export class ManagedEventFanout {
       this.clients.delete(client)
       request.off("aborted", remove)
       response.off("close", remove)
+      if (this.clients.size === 0) {
+        clearTimeout(this.reconnectTimer)
+        this.reconnectTimer = undefined
+      }
     }
     // IncomingMessage `close` can describe completion of the request body rather than the lifetime
     // of the streaming response. The downstream SSE is owned until the client aborts or the response
@@ -185,7 +189,7 @@ export class ManagedEventFanout {
   }
 
   #scheduleReconnect() {
-    if (this.closed || this.reconnectTimer || !this.everStarted) return
+    if (this.closed || this.reconnectTimer || !this.everStarted || this.clients.size === 0) return
     const delay = Math.min(this.reconnectMaxMs, this.reconnectMinMs * 2 ** this.reconnectAttempt)
     this.reconnectAttempt += 1
     this.reconnectTimer = setTimeout(() => {

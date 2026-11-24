@@ -5,6 +5,7 @@ import { createCoalescedTailRefresh } from "../coalesced-tail-refresh"
 import type { ConversationController } from "../conversation-controller"
 import { conversationTurnSessionID, conversationTurns, type ConversationRuntime, type ConversationTurn } from "../conversation-runtime"
 import { mergeLatestMessagePage, prependOlderMessagePage } from "../message-pages"
+import { loadProjectDefaultModelKey, saveProjectDefaultAgent, saveProjectDefaultModelKey } from "../model-preferences"
 import type { NativeSessionRouteContinueInput, NativeSessionRouteMachine } from "../native-session-routing"
 import type { SavedServerProfile } from "../serverProfiles"
 import { taskClient, type AgentModelScope } from "../taskClient"
@@ -100,6 +101,11 @@ type Props = {
   interactionEnabled?: boolean
   /** Surface a Session-scoped transport failure to the machine runtime immediately. */
   onConnectionIssue?: () => void
+  allowActiveTurnSend?: boolean
+  steeringSupported?: boolean
+  onStartSideChat?: (question: string, model: ModelSelection | null, snapshotMessages: MessageEnvelope[]) => void
+  onToggleTerminal?: () => void
+  terminalOpen?: boolean
   routing?: {
     currentMachineID: string
     machines: NativeSessionRouteMachine[]
@@ -335,8 +341,27 @@ export function WorkThreadConversation({
   transcriptRefreshToken = 0,
   interactionEnabled = true,
   onConnectionIssue,
+  allowActiveTurnSend = false,
+  steeringSupported = false,
+  onStartSideChat,
+  onToggleTerminal,
+  terminalOpen = false,
   routing
 }: Props) {
+  const [activeTurnMode, setActiveTurnMode] = useState<"steer" | "queue">(() => {
+    try {
+      return localStorage.getItem("harness-remote.followUpBehavior.v1") === "queue" ? "queue" : "steer"
+    } catch {
+      return "steer"
+    }
+  })
+  function toggleActiveTurnMode() {
+    setActiveTurnMode((current) => {
+      const next = current === "steer" ? "queue" : "steer"
+      try { localStorage.setItem("harness-remote.followUpBehavior.v1", next) } catch {}
+      return next
+    })
+  }
   const draftStorageKey = `${DRAFT_STORAGE_PREFIX}${conversation.id}`
   const initialAgentID = agentForTurn(conversation, conversation.currentTurn)
   const initialModelKey = modelKey(lastModelForAgent(conversation, initialAgentID))
@@ -865,8 +890,15 @@ export function WorkThreadConversation({
       const latestHasUserPrompt = Boolean(latestConversation.initialPrompt?.trim())
         || conversationTurns(latestConversation).some((turn) => Boolean(turn.prompt?.trim()))
       const mayUseCatalogDefault = !deferModelFallback || routeChanged || !latestHasUserPrompt
+      const rememberedProjectModelKey = mayUseCatalogDefault
+        ? loadProjectDefaultModelKey(latestConversation.directory, targetAgentID)
+        : undefined
       const fallback = mayUseCatalogDefault
-        ? catalog.models.find((model) => model.isDefault) || catalog.models[0]
+        ? (rememberedProjectModelKey
+            ? catalog.models.find((model) => modelKey(model) === rememberedProjectModelKey)
+            : undefined)
+          || catalog.models.find((model) => model.isDefault)
+          || catalog.models[0]
         : undefined
       const chosen = catalog.models.find((model) => modelKey(model) === priorKey) || fallback
       setTargetModelKey((currentKey) => {
@@ -934,9 +966,25 @@ export function WorkThreadConversation({
     }
   }
 
-  async function send() {
+  async function send(deliveryOverride?: "steer" | "queue") {
     const text = draft.trim()
     const promptAttachments = attachments
+    const sideMatch = /^\/(?:btw|side)(?:\s+([\s\S]*))?$/i.exec(text)
+    if (sideMatch && onStartSideChat) {
+      const selectedModelValue = selectedModel
+        ? { providerID: selectedModel.providerID, modelID: selectedModel.modelID, variant: selectedModel.variant }
+        : null
+      if (selectedModel) {
+        saveProjectDefaultModelKey(conversation.directory, targetAgentID, modelKey(selectedModel))
+      }
+      if (routing) {
+        saveProjectDefaultAgent(targetMachineID || routing.currentMachineID, conversation.directory, targetAgentID)
+      }
+      setDraft("")
+      localStorage.removeItem(draftStorageKey)
+      onStartSideChat((sideMatch[1] || "").trim(), selectedModelValue, presentedTimeline)
+      return
+    }
     const slashMatch = /^\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(text)
     const matchedCommand = slashMatch
       ? commands.find((command) => command.name.toLowerCase() === slashMatch[1].toLowerCase())
@@ -944,11 +992,11 @@ export function WorkThreadConversation({
     const slashCommand = slashMatch && matchedCommand
       ? { name: matchedCommand.name, arguments: (slashMatch[2] || "").trim() }
       : undefined
+    const canSteerOrQueueWhileActive = allowActiveTurnSend && !routeChanged && !slashCommand
     if (
       (!text && !promptAttachments.length)
       || sending
-      || working
-      || replySettling
+      || ((working || replySettling) && !canSteerOrQueueWhileActive)
       || sendInFlightRef.current
       || !interactionEnabled
       || modelBootstrapBlocked
@@ -967,13 +1015,20 @@ export function WorkThreadConversation({
     setUncertainDelivery(null)
     try {
       const latest = await controller.refreshConversation(baseConfig, conversation.id)
-      if (isActive(latest)) {
+      const currentlyActive = isActive(latest)
+      if (currentlyActive && !canSteerOrQueueWhileActive) {
         onConversationUpdateRef.current(latest)
         throw new Error(`${agentLabel(agentsRef.current, agentForTurn(latest, latest.currentTurn))} is still working. Stop it or wait for the reply before sending another message.`)
       }
       const selectedModelValue = selectedModel
         ? { providerID: selectedModel.providerID, modelID: selectedModel.modelID, variant: selectedModel.variant }
         : null
+      if (selectedModel) {
+        saveProjectDefaultModelKey(conversation.directory, targetAgentID, modelKey(selectedModel))
+      }
+      if (routing) {
+        saveProjectDefaultAgent(targetMachineID || routing.currentMachineID, conversation.directory, targetAgentID)
+      }
       if (routeChanged && routing) {
         if (slashCommand) throw new Error("Slash commands stay scoped to the open Session. Send a normal prompt to continue on another harness.")
         await routing.onContinue({
@@ -989,12 +1044,16 @@ export function WorkThreadConversation({
         setReplyPending(false)
         modelSelectionTouchedRef.current = false
       } else {
+        const effectiveDelivery = (currentlyActive || working) && canSteerOrQueueWhileActive
+          ? (deliveryOverride ?? (steeringSupported ? activeTurnMode : "queue"))
+          : undefined
         const next = await controller.continueConversation(baseConfig, conversation.id, {
           prompt: text,
           attachments: promptAttachments,
           command: slashCommand,
           agentId: targetAgentID,
-          model: selectedModelValue
+          model: selectedModelValue,
+          ...(effectiveDelivery ? { delivery: effectiveDelivery } : {})
         })
         localStorage.removeItem(draftStorageKey)
         setAttachments([])
@@ -1121,6 +1180,10 @@ export function WorkThreadConversation({
             <ModelPicker compact models={models} value={targetModelKey} onChange={(value) => {
               modelSelectionTouchedRef.current = true
               setTargetModelKey(value)
+              saveProjectDefaultModelKey(conversation.directory, targetAgentID, value)
+              if (routing) {
+                saveProjectDefaultAgent(targetMachineID || routing.currentMachineID, conversation.directory, targetAgentID)
+              }
             }} disabled={!interactionEnabled || working || replyPending || sending || modelsLoading || !targetAgentID} loading={modelsLoading} placeholder={modelBootstrapBlocked ? (modelError ? "Model unavailable" : "Loading models…") : deferModelFallback ? "Harness default" : undefined} unavailableHint={modelError || undefined} />
             {modelError ? <small className="tdw-field-note" title={modelError}>Model catalog unavailable. Sending is paused until a model can be verified.</small> : null}
           </label>
@@ -1180,10 +1243,27 @@ export function WorkThreadConversation({
         onAttachmentError={setError}
         onSend={send}
         sending={preparingReply}
-        sendDisabled={!interactionEnabled || working || replySettling || hasAttention || routeBlockedByAttachments || modelBootstrapBlocked}
+        sendDisabled={!interactionEnabled || ((!allowActiveTurnSend || routeChanged) && (working || replySettling)) || hasAttention || routeBlockedByAttachments || modelBootstrapBlocked}
         composerDisabled={!interactionEnabled || modelBootstrapBlocked}
         onStop={working && interactionEnabled ? stop : undefined}
         stopping={stopping}
+        allowActiveTurnSend={allowActiveTurnSend && !routeChanged}
+        activeTurnMode={activeTurnMode}
+        steeringSupported={steeringSupported}
+        onToggleActiveTurnMode={toggleActiveTurnMode}
+        onOpenSideChat={onStartSideChat ? () => {
+          const selectedModelValue = selectedModel
+            ? { providerID: selectedModel.providerID, modelID: selectedModel.modelID, variant: selectedModel.variant }
+            : null
+          const initial = draft.trim()
+          if (initial) {
+            setDraft("")
+            localStorage.removeItem(draftStorageKey)
+          }
+          onStartSideChat(initial, selectedModelValue, presentedTimeline)
+        } : undefined}
+        onOpenTerminal={onToggleTerminal}
+        terminalOpen={terminalOpen}
         placeholder={`Message ${agentLabel(destinationAgents, targetAgentID)}…`}
         emptyText="Start the conversation. You can continue with another coding agent at any time."
         transcriptError={transcriptError || undefined}
@@ -1192,7 +1272,11 @@ export function WorkThreadConversation({
           : modelBootstrapBlocked
             ? modelsLoading ? "Loading available models…" : "A verified model is required before sending"
             : working
-              ? "The agent is working on your last message"
+              ? (allowActiveTurnSend
+                ? (steeringSupported && activeTurnMode === "steer"
+                  ? "Agent is working · Send steers the active turn (Ctrl/Cmd+Shift+Enter queues)"
+                  : "Agent is working · Send queues after the active turn")
+                : "The agent is working on your last message")
               : replySettling
                 ? "Waiting for the completed reply to become available…"
                 : undefined}

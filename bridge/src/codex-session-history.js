@@ -245,10 +245,10 @@ async function codexConfiguredModelProvider(codexHome) {
 
 function decodeCodexListCursor(cursor) {
   if (typeof cursor !== "string" || !cursor.startsWith(CODEX_LIST_CURSOR_PREFIX)) return undefined
-  const match = /^(\d+)(?::(.+))?$/.exec(cursor.slice(CODEX_LIST_CURSOR_PREFIX.length))
+  const match = /^(-?\d+)(?::(.+))?$/.exec(cursor.slice(CODEX_LIST_CURSOR_PREFIX.length))
   if (!match) return undefined
   const createdAtMs = Number(match[1])
-  if (!Number.isSafeInteger(createdAtMs) || createdAtMs <= 0) return undefined
+  if (!Number.isSafeInteger(createdAtMs) || createdAtMs < 0) return undefined
   try {
     // Accept the old timestamp-only format for clients already holding a cursor.
     return { createdAtMs, id: match[2] ? decodeURIComponent(match[2]) : undefined }
@@ -257,21 +257,40 @@ function decodeCodexListCursor(cursor) {
   }
 }
 
+function escapeSqliteLike(value) {
+  return value.replace(/[\\%_]/g, "\\$&")
+}
+
+function codexTitleExpression(columns) {
+  const parts = ["name", "title", "preview", "first_user_message"]
+    .filter((column) => columns.has(column))
+    .map((column) => `NULLIF(${column}, '')`)
+  return parts.length ? `COALESCE(${parts.join(", ")}, '')` : "''"
+}
+
+function codexTimestampExpression(columns, msColumn, secColumn) {
+  if (columns.has(msColumn)) return msColumn
+  if (columns.has(secColumn)) return `(${secColumn} * 1000)`
+  return undefined
+}
+
 async function listCodexThreads({ codexHome, cursor, sinceMs, query, limit = CODEX_LIST_PAGE_LIMIT }) {
   const database = await codexStateDatabase(codexHome)
   if (!database) return undefined
   const { file, columns } = database
-  for (const required of ["id", "cwd", "created_at_ms", "updated_at_ms", "archived", "source"]) {
+  for (const required of ["id", "cwd", "archived", "source"]) {
     if (!columns.has(required)) return undefined
   }
-  const titleExpression = columns.has("name") && columns.has("preview")
-    ? "COALESCE(NULLIF(name, ''), preview, '')"
-    : columns.has("name")
-      ? "COALESCE(name, '')"
-      : columns.has("preview")
-        ? "COALESCE(preview, '')"
-        : "''"
-  const modelProvider = columns.has("model_provider") ? await codexConfiguredModelProvider(codexHome) : undefined
+  const createdExpr = codexTimestampExpression(columns, "created_at_ms", "created_at")
+  const updatedExpr = codexTimestampExpression(columns, "updated_at_ms", "updated_at")
+  if (!createdExpr || !updatedExpr) return undefined
+  const titleExpression = codexTitleExpression(columns)
+  const searchableColumns = ["name", "title", "preview", "first_user_message"]
+    .filter((column) => columns.has(column))
+  const trimmedQuery = typeof query === "string" ? query.trim() : ""
+  const modelProvider = !trimmedQuery && columns.has("model_provider")
+    ? await codexConfiguredModelProvider(codexHome)
+    : undefined
   const before = cursor === undefined ? undefined : decodeCodexListCursor(cursor)
   if (cursor !== undefined && before === undefined) return undefined
   const boundedLimit = Math.max(1, Math.min(200, Number(limit) || CODEX_LIST_PAGE_LIMIT))
@@ -283,34 +302,43 @@ async function listCodexThreads({ codexHome, cursor, sinceMs, query, limit = COD
     const conditions = ["archived = 0", "(source IS NULL OR source NOT LIKE '{%')"]
     const parameters = []
     if (Number.isFinite(sinceMs) && sinceMs > 0) {
-      conditions.push("updated_at_ms >= ?")
+      conditions.push(`${updatedExpr} >= ?`)
       parameters.push(sinceMs)
     }
     if (modelProvider) {
       conditions.push("model_provider = ?")
       parameters.push(modelProvider)
     }
-    if (typeof query === "string" && query.trim()) {
-      const pattern = `%${query.trim()}%`
-      conditions.push(`(${titleExpression} LIKE ? OR cwd LIKE ? OR id LIKE ?)`)
-      parameters.push(pattern, pattern, pattern)
+    if (trimmedQuery) {
+      const pattern = `%${escapeSqliteLike(trimmedQuery)}%`
+      const textClauses = [
+        ...searchableColumns.map((column) => `COALESCE(${column}, '') LIKE ? ESCAPE '\\'`),
+        "cwd LIKE ? ESCAPE '\\'",
+        "id LIKE ? ESCAPE '\\'"
+      ]
+      conditions.push(`(${textClauses.join(" OR ")})`)
+      for (let index = 0; index < textClauses.length; index += 1) parameters.push(pattern)
     }
     if (before) {
       if (before.id !== undefined) {
-        conditions.push("(created_at_ms < ? OR (created_at_ms = ? AND id < ?))")
+        conditions.push(`(${createdExpr} < ? OR (${createdExpr} = ? AND id < ?))`)
         parameters.push(before.createdAtMs, before.createdAtMs, before.id)
       } else {
-        conditions.push("created_at_ms < ?")
+        conditions.push(`${createdExpr} < ?`)
         parameters.push(before.createdAtMs)
       }
     }
-    const rows = databaseHandle.prepare(`SELECT id, cwd, ${titleExpression} AS title, created_at_ms AS createdAtMs, updated_at_ms AS updatedAtMs FROM threads WHERE ${conditions.join(" AND ")} ORDER BY created_at_ms DESC, id DESC LIMIT ?`).all(...parameters, boundedLimit + 1)
+    const snippetSelect = searchableColumns.length
+      ? `${searchableColumns.map((column) => `COALESCE(${column}, '')`).join(" || '\n' || ")} AS searchText`
+      : "'' AS searchText"
+    const rows = databaseHandle.prepare(`SELECT id, cwd, ${titleExpression} AS title, ${snippetSelect}, ${createdExpr} AS createdAtMs, ${updatedExpr} AS updatedAtMs FROM threads WHERE ${conditions.join(" AND ")} ORDER BY ${createdExpr} DESC, id DESC LIMIT ?`).all(...parameters, boundedLimit + 1)
     const hasMore = rows.length > boundedLimit
     const page = hasMore ? rows.slice(0, boundedLimit) : rows
     const sessions = page.map((row) => ({
       sessionId: row.id,
       cwd: row.cwd,
       title: row.title || null,
+      ...(row.searchText ? { searchText: row.searchText } : {}),
       updatedAt: Number.isFinite(row.updatedAtMs) ? new Date(row.updatedAtMs).toISOString() : undefined
     }))
     const last = page[page.length - 1]

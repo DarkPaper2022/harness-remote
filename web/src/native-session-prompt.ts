@@ -15,6 +15,7 @@ export type PendingNativeSessionPrompt = {
   wireText?: string
   model?: ModelSelection | null
   attachmentKeys?: string[]
+  delivery?: "steer" | "queue"
   createdAt: number
 }
 
@@ -111,15 +112,17 @@ export function loadPendingNativeSessionPrompt(target: NativeSessionSurfaceTarge
     if (!raw) return null
     const parsed = JSON.parse(raw) as Partial<PendingNativeSessionPrompt>
     if (typeof parsed.clientRequestId !== "string" || !parsed.clientRequestId) return null
-    if (typeof parsed.text !== "string" || !parsed.text.trim()) return null
+    const attachmentList = Array.isArray(parsed.attachmentKeys)
+      ? parsed.attachmentKeys.filter((value): value is string => typeof value === "string")
+      : []
+    if ((typeof parsed.text !== "string" || !parsed.text.trim()) && attachmentList.length === 0) return null
     return {
       clientRequestId: parsed.clientRequestId,
-      text: parsed.text,
+      text: typeof parsed.text === "string" ? parsed.text : "",
       wireText: typeof parsed.wireText === "string" && parsed.wireText.trim() ? parsed.wireText : undefined,
       model: normalizeModel(parsed.model),
-      attachmentKeys: Array.isArray(parsed.attachmentKeys)
-        ? parsed.attachmentKeys.filter((value): value is string => typeof value === "string")
-        : [],
+      attachmentKeys: attachmentList,
+      ...(parsed.delivery === "steer" || parsed.delivery === "queue" ? { delivery: parsed.delivery } : {}),
       createdAt: typeof parsed.createdAt === "number" ? parsed.createdAt : Date.now()
     }
   } catch {
@@ -178,10 +181,11 @@ export async function sendNativeSessionPrompt(
   target: NativeSessionSurfaceTarget,
   text: string,
   model?: ModelSelection | null,
-  attachments: AttachmentPart[] = []
+  attachments: AttachmentPart[] = [],
+  delivery?: "steer" | "queue"
 ): Promise<{ status: NativeSessionPromptStatus; clientRequestId: string }> {
   const normalized = text.trim()
-  if (!normalized) throw new Error("A text prompt is required")
+  if (!normalized && attachments.length === 0) throw new Error("A text prompt or image attachment is required")
   const requestedModel = normalizeModel(model)
   const requestedAttachmentKeys = attachmentKeys(attachments)
 
@@ -199,15 +203,17 @@ export async function sendNativeSessionPrompt(
     existing.text !== normalized
     || !sameModel(existing.model, requestedModel)
     || !sameAttachmentKeys(existing.attachmentKeys, requestedAttachmentKeys)
+    || (existing.delivery ?? undefined) !== (delivery ?? undefined)
   )) {
     throw new Error("A previous prompt still has an unresolved delivery status. Retry that exact prompt, model and image selection before sending a different request.")
   }
   const pending = existing ?? {
     clientRequestId: requestID(),
     text: normalized,
-    wireText: wirePrompt(target, normalized),
+    wireText: normalized ? wirePrompt(target, normalized) : "",
     model: requestedModel,
     attachmentKeys: requestedAttachmentKeys,
+    ...(delivery ? { delivery } : {}),
     createdAt: Date.now()
   }
   persistPending(target, pending)
@@ -219,6 +225,7 @@ export async function sendNativeSessionPrompt(
     directory: target.directory,
     model: pending.model ? { providerID: pending.model.providerID, modelID: pending.model.modelID } : undefined,
     variant: pending.model?.variant || undefined,
+    ...(pending.delivery ? { delivery: pending.delivery } : {}),
     attachments
   }
 
